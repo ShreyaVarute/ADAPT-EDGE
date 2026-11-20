@@ -1,176 +1,343 @@
-
 # ADAPT-EDGE
-
 ## Decision-Selective Computation for Resource-Bounded Edge AI Model Switching
 
-ADAPT-EDGE is a research project that investigates how edge AI systems can reduce unnecessary computation when a lightweight model is uncertain about its prediction.
+ADAPT-EDGE is a research project that investigates adaptive computation for AI inference on resource-constrained edge devices.
 
-Instead of always executing a larger model completely, the system investigates whether selected intermediate computations from the larger model can provide useful evidence for deciding what to do next.
+Instead of always executing a larger model completely when a lightweight model produces an uncertain prediction, ADAPT-EDGE investigates whether selected intermediate computations can provide sufficient additional evidence.
+
+The system uses three execution decisions:
+
+- **RETAIN:** Keep the lightweight model's prediction.
+- **PROBE:** Execute a selected intermediate probe in the larger model.
+- **SWITCH:** Execute the complete larger model.
+
+The decision controller considers prediction uncertainty, expected decision information, computational cost and available hardware resources.
 
 ## 1. Objectives
 
-- Compare a lightweight model with a larger model.
-- Investigate partial execution of the larger model.
+- Compare lightweight and larger deep learning models.
+- Investigate partial execution of a larger model.
 - Use intermediate probe outputs to gather additional evidence.
-- Decide whether to retain the lightweight prediction, execute another probe, or complete the larger model.
-- Evaluate accuracy, latency, computational cost, and resource usage.
+- Implement RETAIN, PROBE and SWITCH decisions.
+- Monitor hardware resources during inference.
+- Investigate continuation caching to reduce repeated computation.
+- Evaluate accuracy, latency, computational cost and resource usage.
+- Support training and evaluation of candidate models through the application interface.
 
 ## 2. Technology Stack
 
+**Backend and AI**
 - Python 3.10
 - PyTorch
 - Torchvision
 - CUDA
+- FastAPI
+- NumPy
+- Pandas
+- Scikit-learn
+- Matplotlib
+- Pillow
+- tqdm
+
+**Frontend**
+- React
+- Vite
+- JavaScript
+- CSS
+
+**Research models and dataset**
 - MobileNetV3-Small
 - MobileNetV3-Large
 - CIFAR-10
-- NumPy and Pandas
-- Scikit-learn
-- Matplotlib
+- Additional compatible candidate architectures, subject to implementation and evaluation.
 
-## 3. Hardware
+## 3. Development Hardware
 
 Development hardware:
 - NVIDIA GeForce RTX 3050 Laptop GPU
-- 4 GB GPU memory
+- 4 GB dedicated GPU memory
+- Windows 11
+- Python 3.10
 
-Experiments should begin with small batches to limit GPU memory usage and heat.
+For GPU-constrained environments, begin with small batch sizes and monitor GPU memory and temperature.
 
 ## 4. Project Structure
 
 ```text
 ADAPT-EDGE/
+│
 ├── README.md
 ├── requirements.txt
 ├── .gitignore
 ├── env_check.py
-├── data/
-│   └── cifar10/
+│
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   └── pages/
+│   ├── package.json
+│   ├── package-lock.json
+│   └── vite.config.js
+│
+├── server/
+│   ├── api/
+│   │   ├── datasets.py
+│   │   ├── diagnostics.py
+│   │   ├── experiments.py
+│   │   ├── hardware.py
+│   │   ├── inference.py
+│   │   ├── reports.py
+│   │   └── training.py
+│   ├── app.py
+│   └── core.py
+│
 ├── models/
 │   ├── model_a.py
-│   ├── model_b.py
-│   └── checkpoints/
-├── probes/
-│   ├── probe_heads.py
-│   └── probe_data.py
+│   └── model_b.py
+│
+├── pipeline/
+│   └── adapt_edge_pipeline.py
+│
 ├── controller/
 │   ├── comparative_estimator.py
 │   ├── cost_estimator.py
-│   └── decision_controller.py
+│   ├── decision_controller.py
+│   └── resource_policy.py
+│
+├── probes/
+│   ├── probe_heads.py
+│   └── probe_data.py
+│
 ├── cache/
 │   └── continuation_cache.py
+│
 ├── experiments/
-│   ├── baseline.py
-│   ├── prepare_dataset.py
-│   ├── probe_experiment.py
-│   └── evaluation.py
-└── utils/
-    ├── metrics.py
-    └── profiling.py
+│
+├── tests/
+│
+├── utils/
+│
+├── start_dev.bat
+└── start_platform.bat
 ```
+
+This is a representative structure. Refer to the actual repository for the complete list of files.
 
 ## 5. Environment Setup
 
-Windows CMD (recommended for this repo):
+### Prerequisites
+
+- Python 3.10
+- Node.js and npm
+- Git
+- NVIDIA GPU and compatible CUDA-enabled PyTorch installation (optional)
+
+### Clone the repository
 
 ```cmd
-cd /d "D:\Semester\7th sem\IPR\ADAPT-EDGE"
-.\.venv\Scripts\activate.bat
-python -m pip install -r requirements.txt
+git clone https://github.com/ShreyaVarute/ADAPT-EDGE.git
+cd ADAPT-EDGE
+```
+
+### Create a Python virtual environment
+
+```cmd
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+### Install Python dependencies
+
+```cmd
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### Install PyTorch with CUDA support
+
+Install the PyTorch and Torchvision versions compatible with your CUDA environment using the official PyTorch installation selector:
+
+https://pytorch.org/get-started/locally/
+
+Verify the environment:
+
+```cmd
 python env_check.py
 ```
 
-PowerShell equivalent:
-
-```powershell
-cd "D:\Semester\7th sem\IPR\ADAPT-EDGE"
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python env_check.py
-```
-
-PyTorch and Torchvision are installed separately with CUDA support when available.
-
-## 6. Inference Usage
-
-From the project root, run one real CIFAR-10 image through the integrated resource-aware ADAPT-EDGE pipeline:
+### Install frontend dependencies
 
 ```cmd
-cd /d "D:\Semester\7th sem\IPR\ADAPT-EDGE"
-.\.venv\Scripts\python.exe -c "from pipeline.adapt_edge_pipeline import AdaptEdgePipeline; from torchvision import datasets, transforms; import torch; transform = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]); ds = datasets.CIFAR10(root='data/cifar10', train=False, download=False, transform=transform); img, label = ds[0]; pipeline = AdaptEdgePipeline(device=(torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')), max_latency_budget_ms=25.0, enable_cache=True, enforce_resource_budget=True); result = pipeline.predict(img.unsqueeze(0), request_id='cmd_smoke_test'); print({'prediction': result['prediction'], 'confidence': round(float(result['confidence']), 4), 'action': result['action'], 'status': result.get('status'), 'latency_ms': round(float(result['latency_ms']), 2), 'resource_violations': result.get('resource_violations', [])})"
+cd frontend
+npm install
+cd ..
 ```
 
-This uses the actual Model A + ResourceMonitor + DecisionController + continuation cache path in the real inference pipeline. It does not retrain the models or overwrite the checkpoint files.
+## 6. Running the Application
 
-## 7. Dataset
+ADAPT-EDGE provides two Windows startup scripts.
 
-The initial benchmark uses CIFAR-10:
+### Development mode
+
+Run:
+
+```cmd
+start_dev.bat
+```
+
+This starts:
+- FastAPI backend: http://127.0.0.1:8000
+- React frontend: http://localhost:3000
+- API documentation: http://127.0.0.1:8000/docs
+
+Development mode supports backend and frontend hot reloading.
+
+### Demonstration mode
+
+Run:
+
+```cmd
+start_platform.bat
+```
+
+This starts the FastAPI application and opens the dashboard at:
+
+http://127.0.0.1:8000
+
+API documentation:
+
+http://127.0.0.1:8000/docs
+
+## 7. Dataset Management
+
+The initial research benchmark uses CIFAR-10:
 
 - 50,000 training images
 - 10,000 test images
 - 10 image classes
 
-Dataset location:
+CIFAR-10 contains:
+airplane, automobile, bird, cat, deer, dog, frog, horse, ship and truck.
 
-```text
-data/cifar10/
-```
+The application also supports custom image dataset upload through its dataset-management workflow.
 
-The dataset is downloaded only when required files are missing. Once downloaded successfully, it can be reused across experiments.
+Custom datasets should be organized into class-specific folders before being packaged into a ZIP archive.
 
-For the initial experiment, use a small subset if training takes too long. Later experiments can use more or all of the training data.
+Dataset files are not included in the GitHub source repository.
 
-## 7. Model Definitions
+## 8. Model Training and Selection
 
-### Model A
-MobileNetV3-Small is the lightweight model.
+The application supports a session-based candidate model training workflow.
 
-### Model B
-MobileNetV3-Large is the larger model.
+Users can:
+- Upload and inspect datasets.
+- Configure training parameters.
+- Select available candidate architectures.
+- Train candidate models.
+- View training progress and metrics.
+- Evaluate candidate models.
+- Compare their performance.
+- Use compatible trained models for inference.
 
-Both models must be adapted and trained or fine-tuned for the selected dataset before meaningful accuracy comparisons can be made.
+Model A represents the lightweight model.
 
-## 8. Proposed Execution Workflow
+Model B represents the more computationally capable model.
 
-1. Verify the Python and CUDA environment.
-2. Load and prepare CIFAR-10.
-3. Implement and train Model A.
-4. Implement and train Model B.
-5. Measure standalone model accuracy and latency.
-6. Divide Model B into explicitly executable segments.
-7. Add intermediate probe heads.
-8. Estimate the benefit and cost of further computation.
-9. Implement the decision controller.
-10. Evaluate the complete ADAPT-EDGE method against baselines.
+Model selection should consider accuracy, parameter count, FLOPs, inference latency and memory consumption.
 
-## 9. Evaluation Metrics
+## 9. Temporary Candidate Model Storage
 
-Record the following measurements:
+Newly trained experimental candidate models use temporary backend memory storage.
+
+- Trained candidate weights remain in RAM during the active backend session.
+- Training metrics and evaluation results remain available during that session.
+- Candidate models can be used for inference without permanently saving their checkpoints.
+- Candidate models and session results are cleared when the backend restarts.
+- Candidate models must be trained again after a backend restart.
+
+Existing baseline and probe research checkpoints are maintained separately and are not modified by this temporary candidate-training workflow.
+
+## 10. ADAPT-EDGE Execution Workflow
+
+The proposed execution process is:
+
+1. Receive an input image.
+2. Preprocess the image.
+3. Generate an initial prediction using Model A.
+4. Evaluate prediction uncertainty.
+5. Assess expected decision information and computational cost.
+6. Check available hardware resources.
+7. Select RETAIN, PROBE or SWITCH.
+8. Execute the selected computation.
+9. Produce the final prediction.
+10. Record inference performance metrics.
+
+Intermediate probes must be compatible with the selected Model B architecture and its feature representations.
+
+## 11. Evaluation Metrics
+
+The research evaluation considers:
 
 - Classification accuracy
-- End-to-end latency
-- Additional computation required by probes
-- Total computation cost
+- Precision
+- Recall
+- F1-score
+- Training loss
+- Validation loss
+- Parameter count
+- FLOPs
+- Model size
+- Average inference latency
+- P95 inference latency
 - GPU memory usage
+- Resource violations
 - Model switching frequency
-- Accuracy and cost trade-offs
+- Computational cost
 
-Use repeated measurements and a consistent hardware setup when comparing models.
+Use consistent datasets, hardware configurations and measurement conditions when comparing approaches.
 
-## 10. Research Note
+## 12. Research Comparisons
 
-The proposed method is a research hypothesis that must be evaluated experimentally. Improved accuracy, reduced latency, and reduced computation must not be assumed before measurement.
+The experimental framework can compare:
 
-Random input tests can verify execution but cannot establish meaningful classification accuracy.
+- Model A independently.
+- Model B independently.
+- Conventional Model A to Model B switching.
+- ADAPT-EDGE without caching.
+- ADAPT-EDGE with caching.
+- Compatible pretrained models.
+- External black-box AI services, where supported.
 
-## 11. Current Status
+Local and remote inference measurements should be reported separately.
 
-- Python virtual environment: configured
-- PyTorch and CUDA: verified
-- GPU detection: verified
-- Model A and Model B: basic inference tested
-- CIFAR-10: downloading/preparation in progress
-- Model training: pending
-- Probe mechanism: pending
-- Decision controller: pending
-- Final evaluation: pending
+## 13. Research Limitations
+
+ADAPT-EDGE is an experimental research approach.
+
+Performance improvements in accuracy, latency, computational cost and resource consumption must be established through actual experiments.
+
+A larger model does not automatically guarantee higher accuracy. Similarly, caching does not automatically guarantee faster inference.
+
+## 14. Current Implementation
+
+The application includes:
+- FastAPI backend.
+- React and Vite frontend.
+- Dataset management.
+- Candidate model training workflow.
+- Session-based candidate model storage.
+- Model inference.
+- Results and comparison interface.
+- Hardware monitoring.
+- ADAPT-EDGE pipeline and decision controller.
+- RETAIN, PROBE and SWITCH execution logic.
+- ContinuationCache.
+- Automated tests.
+
+Some capabilities, such as support for arbitrary model architectures, compatible probe generation and external black-box benchmarking, depend on their individual implementation and validation.
+
+## 15. Repository
+
+GitHub: https://github.com/ShreyaVarute/ADAPT-EDGE
+
+The repository contains application source code and research implementation files. Datasets, virtual environments, secrets and trained model weights are excluded from the source repository.

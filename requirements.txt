@@ -1,8 +1,20 @@
 
+# Core Python and data processing
 numpy
 pandas
-matplotlib
 scikit-learn
+matplotlib
 tqdm
-pillow
+Pillow
+
+# Dataset utilities
 datasets
+
+# Deep learning
+torch
+torchvision
+
+# Backend
+fastapi
+uvicorn[standard]
+python-multipart
