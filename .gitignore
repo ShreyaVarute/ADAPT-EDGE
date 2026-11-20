@@ -1,0 +1,52 @@
+# Datasets and uploads
+data/
+datasets/
+scratch/
+tmp_test_*/
+*.zip
+
+# Backup files
+backups/
+*.bak
+*.before_*.bak
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Model weights
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.safetensors
+
+# Experimental outputs
+outputs/
+results/
+runs/
+checkpoints/
+
+# Logs
+*.log
+logs/
+
+backups/
+*.bak
+AGENT_WORK_LOG.md
+
+# Unnecessary image files
+OIP.webp
+istockphoto-175397603-612x612.jpg
