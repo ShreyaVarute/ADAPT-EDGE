@@ -20,6 +20,7 @@ from server.api.experiments import router as experiments_router
 from server.api.diagnostics import router as diagnostics_router
 from server.api.training import router as training_router
 from server.api.reports import router as reports_router
+from server.api.settings import router as settings_router
 
 
 @asynccontextmanager
@@ -61,6 +62,7 @@ app.include_router(experiments_router)
 app.include_router(diagnostics_router)
 app.include_router(training_router)
 app.include_router(reports_router)
+app.include_router(settings_router)
 
 
 # Canonical model and resource aliases

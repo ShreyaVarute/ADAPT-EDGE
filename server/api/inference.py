@@ -28,6 +28,102 @@ INFERENCE_HISTORY = deque(maxlen=100)
 INFERENCE_HISTORY_LOCK = threading.Lock()
 
 
+class ConfigurePairRequest(BaseModel):
+    model_a_id: str
+    model_b_id: str
+    threshold_a: Optional[float] = 0.85
+    threshold_probe: Optional[float] = 0.80
+    latency_budget_ms: Optional[float] = 25.0
+    enforce_resource_budget: Optional[bool] = True
+
+
+@router.get("/pair")
+def get_active_model_pair():
+    """Returns the currently active Model A and Model B pair configuration."""
+    mgr = ServiceManager.get_instance()
+    with CANDIDATE_MODELS_LOCK:
+        candidates = [
+            {
+                "id": run_id,
+                "name": f"{cand['metadata'].get('architecture_display', cand['metadata']['architecture'])} ({run_id})",
+                "architecture": cand["metadata"]["architecture"],
+                "accuracy": cand["metrics"].get("best_val_accuracy"),
+                "dataset_id": cand["metadata"]["dataset_id"],
+            }
+            for run_id, cand in CANDIDATE_MODELS.items()
+        ]
+    return {
+        "success": True,
+        "active_pair": mgr.active_pair,
+        "available_candidates": candidates,
+    }
+
+
+@router.post("/pair")
+def configure_model_pair(req: ConfigurePairRequest):
+    """
+    Configures and switches active Model A and Model B pairing.
+    Validates probe compatibility: PROBE is only enabled if Model B is MobileNetV3-Large.
+    """
+    mgr = ServiceManager.get_instance()
+
+    # Resolve Model A
+    model_a_name = "MobileNetV3-Small (Baseline)"
+    model_a_type = "mobilenet_v3_small"
+    if req.model_a_id != "mobilenet_v3_small_baseline":
+        with CANDIDATE_MODELS_LOCK:
+            cand_a = CANDIDATE_MODELS.get(req.model_a_id)
+        if not cand_a:
+            raise HTTPException(status_code=404, detail=f"Candidate Model A '{req.model_a_id}' not found.")
+        model_a_name = f"{cand_a['metadata'].get('architecture_display', cand_a['metadata']['architecture'])} (Candidate)"
+        model_a_type = cand_a["metadata"]["architecture"]
+
+    # Resolve Model B
+    model_b_name = "MobileNetV3-Large (Baseline)"
+    model_b_type = "mobilenet_v3_large"
+    if req.model_b_id != "mobilenet_v3_large_baseline":
+        with CANDIDATE_MODELS_LOCK:
+            cand_b = CANDIDATE_MODELS.get(req.model_b_id)
+        if not cand_b:
+            raise HTTPException(status_code=404, detail=f"Candidate Model B '{req.model_b_id}' not found.")
+        model_b_name = f"{cand_b['metadata'].get('architecture_display', cand_b['metadata']['architecture'])} (Candidate)"
+        model_b_type = cand_b["metadata"]["architecture"]
+
+    # Probe Compatibility Enforcement
+    # Probe checkpoints are trained exclusively for MobileNetV3-Large backbone representations
+    probes_compatible = (
+        model_b_type in {"mobilenet_v3_large", "large"} and
+        (req.model_b_id == "mobilenet_v3_large_baseline" or "mobilenet_v3_large" in req.model_b_id)
+    )
+
+    mgr.active_pair = {
+        "model_a_id": req.model_a_id,
+        "model_a_name": model_a_name,
+        "model_a_type": model_a_type,
+        "model_b_id": req.model_b_id,
+        "model_b_name": model_b_name,
+        "model_b_type": model_b_type,
+        "threshold_a": float(req.threshold_a if req.threshold_a is not None else 0.85),
+        "threshold_probe": float(req.threshold_probe if req.threshold_probe is not None else 0.80),
+        "latency_budget_ms": float(req.latency_budget_ms if req.latency_budget_ms is not None else 25.0),
+        "enforce_resource_budget": bool(req.enforce_resource_budget),
+        "probes_compatible": probes_compatible,
+        "probe_blocks": [4, 9, 13] if probes_compatible else [],
+    }
+
+    mgr.log_activity(
+        "Model Pair Configured",
+        f"A: {model_a_name} | B: {model_b_name} (Probes: {'Active' if probes_compatible else 'Disabled - Incompatible Architecture'})",
+        "info"
+    )
+
+    return {
+        "success": True,
+        "message": "Model pair updated successfully.",
+        "active_pair": mgr.active_pair,
+    }
+
+
 class PredictRequest(BaseModel):
     source: Optional[str] = "sample"  # "sample" or "upload"
     dataset_index: Optional[int] = None
@@ -83,6 +179,23 @@ def execute_strategy(
     device = pipe.device
     model_a = pipe.model_a
     model_b = pipe.model_b
+
+    # Resolve model_a and model_b based on active_pair
+    active = getattr(mgr, "active_pair", {})
+    model_a_id = active.get("model_a_id", "mobilenet_v3_small_baseline")
+    model_b_id = active.get("model_b_id", "mobilenet_v3_large_baseline")
+
+    if model_a_id != "mobilenet_v3_small_baseline":
+        with CANDIDATE_MODELS_LOCK:
+            cand_a = CANDIDATE_MODELS.get(model_a_id)
+            if cand_a and "model" in cand_a:
+                model_a = cand_a["model"].to(device).eval()
+
+    if model_b_id != "mobilenet_v3_large_baseline":
+        with CANDIDATE_MODELS_LOCK:
+            cand_b = CANDIDATE_MODELS.get(model_b_id)
+            if cand_b and "model" in cand_b:
+                model_b = cand_b["model"].to(device).eval()
 
     strat = strategy.lower()
 
@@ -200,7 +313,16 @@ def execute_strategy(
             if not enable_cache:
                 pipe.cache = None
 
-            res = pipe.predict(tensor)
+            orig_model_a = pipe.model_a
+            orig_model_b = pipe.model_b
+            pipe.model_a = model_a
+            pipe.model_b = model_b
+
+            try:
+                res = pipe.predict(tensor)
+            finally:
+                pipe.model_a = orig_model_a
+                pipe.model_b = orig_model_b
             p_idx = int(res.get("prediction", 0))
             conf = float(res.get("confidence", 0.0))
             status = str(res.get("status", "COMPLETED"))
@@ -462,15 +584,53 @@ def predict_uploaded_image(
         raise HTTPException(status_code=503, detail="AdaptEdgePipeline is not loaded.")
     tensor, preview = mgr.process_uploaded_image(data)
     enable_cache = str(enable_cache).lower() not in {"false", "0"}
-    res = execute_strategy(
-        strategy,
-        tensor,
-        mgr,
-        threshold_a=0.85,
-        threshold_probe=0.80,
-        latency_budget_ms=25.0,
-        enable_cache=enable_cache,
-    )
+    strat_req = (strategy or "ALL").upper()
+
+    active = getattr(mgr, "active_pair", {})
+    thresh_a = float(active.get("threshold_a", 0.85))
+    thresh_p = float(active.get("threshold_probe", 0.80))
+    budget = float(active.get("latency_budget_ms", 25.0))
+
+    if strat_req in ["ALL", "ALL_STRATEGIES"]:
+        comp_a = execute_strategy("model_a", tensor, mgr, thresh_a, thresh_p, budget)
+        comp_b = execute_strategy("model_b", tensor, mgr, thresh_a, thresh_p, budget)
+        comp_conv = execute_strategy("conventional", tensor, mgr, thresh_a, thresh_p, budget)
+        comp_edge = execute_strategy("adapt_edge", tensor, mgr, thresh_a, thresh_p, budget, enable_cache=enable_cache)
+
+        comparison_list = [comp_a, comp_b, comp_conv, comp_edge]
+        res = comp_edge
+        result_payload = {
+            "success": True,
+            "filename": image.filename,
+            "dimensions": [pil_image.width, pil_image.height],
+            "preview_b64": preview,
+            "ground_truth": None,
+            "comparison": comparison_list,
+            "primary": res,
+            "adapt_edge_cached": res,
+            "model_mode": "cifar10",
+        }
+    else:
+        res = execute_strategy(
+            strategy,
+            tensor,
+            mgr,
+            threshold_a=thresh_a,
+            threshold_probe=thresh_p,
+            latency_budget_ms=budget,
+            enable_cache=enable_cache,
+        )
+        result_payload = {
+            "success": True,
+            "filename": image.filename,
+            "dimensions": [pil_image.width, pil_image.height],
+            "preview_b64": preview,
+            "ground_truth": None,
+            "primary": res,
+            "adapt_edge_cached": res,
+            "model_mode": "cifar10",
+        }
+
     with INFERENCE_HISTORY_LOCK:
         INFERENCE_HISTORY.appendleft({
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -492,17 +652,8 @@ def predict_uploaded_image(
         "message": "Potential out-of-distribution image. The model was trained on CIFAR-10 and may produce unreliable predictions for external photographs.",
         "calibration": "pending",
     }
-    return {
-        "success": True,
-        "filename": image.filename,
-        "dimensions": [pil_image.width, pil_image.height],
-        "preview_b64": preview,
-        "ground_truth": None,
-        "primary": res,
-        "adapt_edge_cached": res,
-        "model_mode": "cifar10",
-        "ood": ood,
-    }
+    result_payload["ood"] = ood
+    return result_payload
 
 
 @router.post("/compare")

@@ -99,28 +99,31 @@ class AdaptEdgePipeline:
         self._load_checkpoints()
 
     def _load_checkpoints(self) -> None:
-        """Load Model A, Model B, and probe checkpoints from outputs/."""
+        """Load Model A, Model B, and probe checkpoints from outputs/, or initialize if missing."""
         # Model A
         self.model_a = ModelA(num_classes=10)
         ckpt_a_path = PROJECT_ROOT / "outputs/baseline/mobilenet_v3_small/checkpoints/best_model.pth"
-        ckpt_a = torch.load(ckpt_a_path, map_location=self.device, weights_only=False)
-        self.model_a.load_state_dict(ckpt_a["model_state_dict"])
+        if ckpt_a_path.exists():
+            ckpt_a = torch.load(ckpt_a_path, map_location=self.device, weights_only=False)
+            self.model_a.load_state_dict(ckpt_a["model_state_dict"])
         self.model_a = self.model_a.to(self.device).eval()
 
         # Model B
         self.model_b = ModelB(num_classes=10)
         ckpt_b_path = PROJECT_ROOT / "outputs/baseline/mobilenet_v3_large/checkpoints/best_model.pth"
-        ckpt_b = torch.load(ckpt_b_path, map_location=self.device, weights_only=False)
-        self.model_b.load_state_dict(ckpt_b["model_state_dict"])
+        if ckpt_b_path.exists():
+            ckpt_b = torch.load(ckpt_b_path, map_location=self.device, weights_only=False)
+            self.model_b.load_state_dict(ckpt_b["model_state_dict"])
         self.model_b = self.model_b.to(self.device).eval()
 
         # Sequential Model B & Probes
         self.sequential_b = SequentialModelB(self.model_b, self.device)
         for block, channels in PROBE_CONFIG.items():
-            probe_path = PROJECT_ROOT / f"outputs/probes/block_{block}/best_probe.pth"
-            ckpt_probe = torch.load(probe_path, map_location=self.device, weights_only=False)
             head = ProbeHead(channels, num_classes=10).to(self.device)
-            head.load_state_dict(ckpt_probe["head_state_dict"])
+            probe_path = PROJECT_ROOT / f"outputs/probes/block_{block}/best_probe.pth"
+            if probe_path.exists():
+                ckpt_probe = torch.load(probe_path, map_location=self.device, weights_only=False)
+                head.load_state_dict(ckpt_probe["head_state_dict"])
             head.eval()
             self.sequential_b.register_probe(block, head)
 

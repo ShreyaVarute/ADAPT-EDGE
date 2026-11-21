@@ -3,6 +3,7 @@ import {
   LayoutDashboard,
   Database,
   Zap,
+  Activity,
   BarChart3,
   Sliders,
 } from 'lucide-react';
@@ -15,6 +16,7 @@ export default function Sidebar({ activeTab, setActiveTab, isOpen, onClose }) {
         { id: 'overview', label: 'Overview', icon: LayoutDashboard },
         { id: 'datatrain', label: 'Dataset & Training', icon: Database },
         { id: 'livedemo', label: 'Live Demo', icon: Zap },
+        { id: 'benchmarking', label: 'Benchmarking', icon: Activity },
         { id: 'results', label: 'Results & Comparison', icon: BarChart3 },
         { id: 'settings', label: 'Settings', icon: Sliders },
       ],

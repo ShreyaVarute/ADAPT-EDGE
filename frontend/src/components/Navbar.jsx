@@ -40,6 +40,7 @@ export default function Navbar({ activeTab, onRefresh, onToggleSidebar }) {
     overview: { title: 'Executive Overview', desc: 'System architecture, baseline comparison and live status' },
     datatrain: { title: 'Dataset & Training', desc: 'Upload a ZIP dataset & start model training' },
     livedemo: { title: 'Live Demo', desc: 'Interactively run inference on the edge model' },
+    benchmarking: { title: 'Benchmarking', desc: 'Black-box and edge architecture performance benchmarking' },
     results: { title: 'Results & Comparison', desc: 'View experiment results and benchmark comparisons' },
     settings: { title: 'Settings', desc: 'Configure thresholds, cache options and UI preferences' },
   };
@@ -112,7 +113,7 @@ export default function Navbar({ activeTab, onRefresh, onToggleSidebar }) {
 
         {/* API Docs link */}
         <a
-          href="/docs"
+          href="http://127.0.0.1:8000/docs"
           target="_blank"
           rel="noreferrer"
           className="hidden md:flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-cyan-100 hover:bg-cyan-200 text-cyan-800 border border-cyan-200 text-xs font-mono transition-colors"

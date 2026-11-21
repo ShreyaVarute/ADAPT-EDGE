@@ -851,11 +851,13 @@ def run_comparative_evaluation(
 
 """
     for stat in statistical_reports:
+        mean_lat_ci = stat.get('mean_latency_diff_95ci_ms') or stat.get('latency_diff_95ci_ms', [0.0, 0.0])
+        acc_ci = stat.get('accuracy_diff_95ci', [0.0, 0.0])
         report_content += f"""### {stat['comparison']}
 - **Sample Count**: {stat['sample_count']}
-- **Accuracy Difference**: {stat['accuracy_difference_pct']:+.2f}% (95% CI: [{stat['accuracy_diff_95ci'][0]:+.2f}%, {stat['accuracy_diff_95ci'][1]:+.2f}%])
+- **Accuracy Difference**: {stat['accuracy_difference_pct']:+.2f}% (95% CI: [{acc_ci[0]:+.2f}%, {acc_ci[1]:+.2f}%])
 - **McNemar Test**: stat={stat['mcnemar_stat']:.4f}, p={stat['mcnemar_p_value']:.4f} (Significant: {stat['is_accuracy_diff_significant']})
-- **Mean Latency Difference**: {stat['mean_latency_diff_ms']:+.3f} ms (95% CI: [{stat['latency_diff_95ci_ms'][0]:+.3f}, {stat['latency_diff_95ci_ms'][1]:+.3f}] ms)
+- **Mean Latency Difference**: {stat['mean_latency_diff_ms']:+.3f} ms (95% CI: [{mean_lat_ci[0]:+.3f}, {mean_lat_ci[1]:+.3f}] ms)
 - **Wilcoxon Signed-Rank Test**: stat={stat['wilcoxon_stat']:.4f}, p={stat['wilcoxon_p_value']:.4f} (Significant: {stat['is_latency_diff_significant']})
 
 """

@@ -43,6 +43,8 @@ export const api = {
   getSamples: (count = 12) => fetchJson(`/inference/samples?count=${count}`),
   refreshSamples: (count = 12) => fetchJson(`/inference/samples/refresh?count=${count}`, { method: 'POST' }),
   getCustomModels: () => fetchJson('/training/custom-models'),
+  getModelPair: () => fetchJson('/inference/pair'),
+  configureModelPair: (payload) => fetchJson('/inference/pair', { method: 'POST', body: JSON.stringify(payload) }),
   predict: (payload) => fetchJson('/inference/predict', {
     method: 'POST',
     body: JSON.stringify(payload)
@@ -72,6 +74,7 @@ export const api = {
   startTraining: (payload) => fetchJson('/training/start', { method: 'POST', body: JSON.stringify(payload) }),
   stopTraining: () => fetchJson('/training/stop', { method: 'POST' }),
   getTrainingRecommendations: () => fetchJson('/training/recommendations'),
+  getArchitectures: () => fetchJson('/training/architectures'),
 
   // Experiments
   getExperimentRuns: () => fetchJson('/experiments/runs'),
@@ -99,6 +102,15 @@ export const api = {
   getMarkdownReport: async () => {
     const res = await fetch('/api/reports/markdown');
     return await res.text();
-  }
+  },
+
+  // Settings & System Verification (Phase 11)
+  getSettings: () => fetchJson('/settings'),
+  configureDevice: (payload) => fetchJson('/settings/device', { method: 'POST', body: JSON.stringify(payload) }),
+  updateTrainingDefaults: (payload) => fetchJson('/settings/training-defaults', { method: 'POST', body: JSON.stringify(payload) }),
+  updateResourceBudget: (payload) => fetchJson('/settings/resource-budget', { method: 'POST', body: JSON.stringify(payload) }),
+  updateBackendSettings: (payload) => fetchJson('/settings/backend', { method: 'POST', body: JSON.stringify(payload) }),
+  sessionCleanup: () => fetchJson('/settings/cleanup', { method: 'POST' }),
+  verifyProtectedCheckpoints: () => fetchJson('/settings/verify-integrity')
 };
 

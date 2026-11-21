@@ -1,5 +1,6 @@
 """
 Custom PyTorch training and custom-model discovery.
+Supports dynamic architecture selection via the unified model factory.
 """
 
 import threading
@@ -16,8 +17,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from server.core import PROJECT_ROOT, ServiceManager
-from models.model_a import ModelA
-from models.model_b import ModelB
+from models.architectures import (
+    ARCHITECTURE_REGISTRY,
+    VALID_MODEL_TYPES,
+    build_model,
+    get_architecture_info,
+    resolve_model_type,
+)
 
 router = APIRouter(prefix="/api/training", tags=["Model Training"])
 CANDIDATE_MODELS: Dict[str, Dict[str, Any]] = {}
@@ -25,7 +31,7 @@ CANDIDATE_MODELS_LOCK = threading.Lock()
 
 
 class TrainingConfigRequest(BaseModel):
-    model_type: str = "small"
+    model_type: str = "mobilenet_v3_small"
     dataset_id: str = "cifar10"
     epochs: int = 3
     batch_size: int = 4
@@ -34,6 +40,7 @@ class TrainingConfigRequest(BaseModel):
     device_selection: str = "auto"
     val_split: float = 0.15
     train_limit: Optional[int] = 500
+    image_size: Optional[int] = None
 
 
 class TrainingState:
@@ -204,7 +211,8 @@ def _training_worker(config: TrainingConfigRequest):
             indices = list(range(min(train_limit, len(raw_dataset))))
             full_dataset = torch.utils.data.Subset(raw_dataset, indices)
 
-        input_size = 224
+        arch_info = get_architecture_info(config.model_type)
+        input_size: int = config.image_size or arch_info["input_size"]
         train_transform = transforms.Compose([
             transforms.Resize((input_size, input_size)),
             transforms.RandomHorizontalFlip(p=0.5),
@@ -242,10 +250,14 @@ def _training_worker(config: TrainingConfigRequest):
         train_loader = DataLoader(train_subset, batch_size=config.batch_size, shuffle=True, num_workers=0)
         val_loader = DataLoader(val_subset, batch_size=config.batch_size, shuffle=False, num_workers=0)
 
-        if config.model_type == "large":
-            model = ModelB(pretrained=True, num_classes=len(class_names)).to(device)
-        else:
-            model = ModelA(pretrained=True, num_classes=len(class_names)).to(device)
+        model, input_size = build_model(
+            model_type=config.model_type,
+            num_classes=len(class_names),
+            pretrained=True,
+        )
+        model = model.to(device)
+        canonical_key = resolve_model_type(config.model_type)
+        arch_info = get_architecture_info(canonical_key)
 
         criterion = nn.CrossEntropyLoss()
         if config.optimizer_type.lower() == "adamw":
@@ -266,8 +278,16 @@ def _training_worker(config: TrainingConfigRequest):
             "training_random_horizontal_flip": True,
         }
 
+        import numpy as np
+        from sklearn.metrics import classification_report, confusion_matrix, precision_recall_fscore_support
+
         best_val_acc = -1.0
         best_state = None
+        best_val_predictions = []
+        best_val_targets = []
+        peak_vram_mb = 0.0
+        val_latencies_ms = []
+
         with TRAINER.lock:
             TRAINER.total_steps = len(train_loader)
 
@@ -295,7 +315,10 @@ def _training_worker(config: TrainingConfigRequest):
                     TRAINER.current_step = step
                     TRAINER.elapsed_seconds = time.time() - start_time
                     if torch.cuda.is_available() and device.type == "cuda":
-                        TRAINER.gpu_memory_mb = round(torch.cuda.memory_allocated(device) / 1024**2, 1)
+                        cur_mem = round(torch.cuda.memory_allocated(device) / 1024**2, 1)
+                        TRAINER.gpu_memory_mb = cur_mem
+                        if cur_mem > peak_vram_mb:
+                            peak_vram_mb = cur_mem
 
             if TRAINER.stop_requested:
                 TRAINER.status = "STOPPED"
@@ -303,14 +326,27 @@ def _training_worker(config: TrainingConfigRequest):
 
             model.eval()
             val_loss = val_correct = val_total = 0
+            epoch_val_preds = []
+            epoch_val_targets = []
+            epoch_latencies = []
+
             with torch.no_grad():
                 for images, labels in val_loader:
                     images, labels = images.to(device), labels.to(device)
+                    t_eval_start = time.perf_counter()
                     outputs = model(images)
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t_eval_end = time.perf_counter()
+                    epoch_latencies.append((t_eval_end - t_eval_start) * 1000.0 / max(1, images.size(0)))
+
                     loss = criterion(outputs, labels)
                     val_loss += loss.item() * images.size(0)
-                    val_correct += (outputs.argmax(1) == labels).sum().item()
+                    preds = outputs.argmax(1)
+                    val_correct += (preds == labels).sum().item()
                     val_total += labels.size(0)
+                    epoch_val_preds.extend(preds.cpu().tolist())
+                    epoch_val_targets.extend(labels.cpu().tolist())
 
             train_loss = running_loss / max(total, 1)
             train_acc = correct / max(total, 1) * 100.0
@@ -334,6 +370,9 @@ def _training_worker(config: TrainingConfigRequest):
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
+                best_val_predictions = list(epoch_val_preds)
+                best_val_targets = list(epoch_val_targets)
+                val_latencies_ms = list(epoch_latencies)
                 best_state = {
                     name: value.detach().cpu().clone()
                     for name, value in model.state_dict().items()
@@ -347,6 +386,46 @@ def _training_worker(config: TrainingConfigRequest):
         with TRAINER.lock:
             status = "STOPPED" if TRAINER.status == "STOPPED" else "COMPLETED"
             history = list(TRAINER.history)
+
+            # Calculate parameter count, model size, and FLOPs estimation
+            param_count = sum(p.numel() for p in model.parameters())
+            trainable_param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            model_size_mb = round(sum(p.numel() * p.element_size() for p in model.parameters()) / (1024**2), 2)
+            flops_m = round((param_count * 2) / 1e6, 2)
+
+            # Inference Latency metrics
+            avg_latency_ms = round(float(np.mean(val_latencies_ms)), 2) if val_latencies_ms else None
+            p95_latency_ms = round(float(np.percentile(val_latencies_ms, 95)), 2) if val_latencies_ms else None
+
+            # Advanced Classification Evaluation
+            eval_metrics = {}
+            cm_list = []
+            clf_report = {}
+            if best_val_targets and best_val_predictions:
+                prec, rec, f1, _ = precision_recall_fscore_support(
+                    best_val_targets, best_val_predictions, average="weighted", zero_division=0
+                )
+                macro_p, macro_r, macro_f1, _ = precision_recall_fscore_support(
+                    best_val_targets, best_val_predictions, average="macro", zero_division=0
+                )
+                labels_in_scope = list(range(len(class_names)))
+                cm = confusion_matrix(best_val_targets, best_val_predictions, labels=labels_in_scope)
+                cm_list = cm.tolist()
+                clf_report = classification_report(
+                    best_val_targets, best_val_predictions,
+                    labels=labels_in_scope,
+                    target_names=class_names, output_dict=True, zero_division=0
+                )
+                eval_metrics = {
+                    "accuracy": round(best_val_acc, 2),
+                    "precision_weighted": round(float(prec) * 100.0, 2),
+                    "recall_weighted": round(float(rec) * 100.0, 2),
+                    "f1_score_weighted": round(float(f1) * 100.0, 2),
+                    "precision_macro": round(float(macro_p) * 100.0, 2),
+                    "recall_macro": round(float(macro_r) * 100.0, 2),
+                    "f1_score_macro": round(float(macro_f1) * 100.0, 2),
+                }
+
             metrics = {
                 "best_val_accuracy": round(best_val_acc, 3) if best_val_acc >= 0 else None,
                 "final_train_loss": TRAINER.train_loss,
@@ -354,6 +433,16 @@ def _training_worker(config: TrainingConfigRequest):
                 "final_train_accuracy": TRAINER.train_acc,
                 "final_val_accuracy": TRAINER.val_acc,
                 "duration_seconds": round(time.time() - start_time, 1),
+                "parameter_count": param_count,
+                "trainable_parameters": trainable_param_count,
+                "model_size_mb": model_size_mb,
+                "estimated_mflops": flops_m,
+                "average_inference_latency_ms": avg_latency_ms,
+                "p95_inference_latency_ms": p95_latency_ms,
+                "peak_memory_mb": peak_vram_mb if peak_vram_mb > 0 else round(float(param_count * 4 / (1024**2)), 1),
+                "evaluation": eval_metrics,
+                "confusion_matrix": cm_list,
+                "classification_report": clf_report,
             }
 
         if best_state is not None and status in {"COMPLETED", "STOPPED"}:
@@ -363,7 +452,8 @@ def _training_worker(config: TrainingConfigRequest):
                 "run_id": run_id,
                 "status": status,
                 "dataset_id": config.dataset_id,
-                "architecture": "mobilenet_v3_large" if config.model_type == "large" else "mobilenet_v3_small",
+                "architecture": canonical_key,
+                "architecture_display": arch_info["display_name"],
                 "class_names": class_names,
                 "num_classes": len(class_names),
                 "preprocessing": preprocessing,
@@ -401,8 +491,14 @@ def _training_worker(config: TrainingConfigRequest):
 def start_training(config: TrainingConfigRequest):
     if TRAINER.status in {"RUNNING"}:
         raise HTTPException(status_code=409, detail="A training job is already running.")
-    if config.model_type not in {"small", "large"}:
-        raise HTTPException(status_code=400, detail="model_type must be small or large.")
+    if config.model_type not in VALID_MODEL_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"model_type {config.model_type!r} is not supported. "
+                   f"Valid options: {sorted(VALID_MODEL_TYPES)}",
+        )
+    if config.image_size is not None and not (32 <= config.image_size <= 512):
+        raise HTTPException(status_code=400, detail="image_size must be between 32 and 512.")
     if not 1 <= config.epochs <= 100:
         raise HTTPException(status_code=400, detail="epochs must be between 1 and 100.")
     if not 1 <= config.batch_size <= 32:
@@ -416,21 +512,36 @@ def start_training(config: TrainingConfigRequest):
     if config.dataset_id != "cifar10":
         _safe_custom_dataset(config.dataset_id)
 
+    resolved = resolve_model_type(config.model_type)
+    display = get_architecture_info(resolved)["display_name"]
     TRAINER.reset(config.epochs)
-    TRAINER.add_log(f"Starting real {config.model_type} training on dataset {config.dataset_id}.")
+    TRAINER.add_log(f"Starting training: {display} on dataset {config.dataset_id}.")
     thread = threading.Thread(target=_training_worker, args=(config,), daemon=True)
     TRAINER.thread = thread
     thread.start()
     return {"success": True, "status": "RUNNING", "message": "Training started."}
 
 
+@router.get("/architectures")
+def list_architectures():
+    """Return the full catalogue of supported candidate model architectures."""
+    return {
+        "success": True,
+        "architectures": [
+            {**info, "model_type": key}
+            for key, info in ARCHITECTURE_REGISTRY.items()
+        ],
+    }
+
+
 @router.get("/custom-models")
 def list_custom_models():
     with CANDIDATE_MODELS_LOCK:
-        models = [
+        result = [
             {
                 "run_id": run_id,
                 "architecture": candidate["metadata"]["architecture"],
+                "architecture_display": candidate["metadata"].get("architecture_display", candidate["metadata"]["architecture"]),
                 "class_names": candidate["metadata"]["class_names"],
                 "status": candidate["metadata"]["status"],
                 "metrics": candidate["metrics"],
@@ -439,4 +550,4 @@ def list_custom_models():
             }
             for run_id, candidate in CANDIDATE_MODELS.items()
         ]
-    return {"success": True, "models": models}
+    return {"success": True, "models": result}
