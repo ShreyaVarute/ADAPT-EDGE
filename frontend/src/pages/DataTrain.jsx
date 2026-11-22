@@ -94,7 +94,7 @@ function UploadZone({ onUpload, uploading, uploadProgress, uploadResult }) {
         <UploadCloud className={`h-10 w-10 ${dragging ? 'text-blue-500' : 'text-slate-400'}`} />
         <div>
           <p className="text-sm font-semibold text-slate-700">Drop a ZIP archive or click to browse</p>
-          <p className="mt-1 text-xs text-slate-500">Class-folder structure required · Max 200 MB · JPG, PNG, BMP, WebP</p>
+          <p className="mt-1 text-xs text-slate-500">Class-folder structure required · Max 500 MB · JPG, PNG, BMP, WebP</p>
         </div>
       </div>
 
@@ -383,10 +383,13 @@ function DatasetInspect({ info, isCustom }) {
 }
 
 /* ─── training panel (unchanged logic, improved UI) ──────────────────────── */
-function TrainingPanel({ config, setConfig, telemetry, customModels, onStart, onStop, recommendations, architectures = [], datasets = [] }) {
-  const trainingHist = telemetry?.history || [];
-  const selectedArch = architectures.find(a => a.model_type === config.model_type);
-  const currentImageSize = config.image_size || selectedArch?.input_size || 224;
+function TrainingPanel({
+  config, setConfig, jobs, customModels, onStart, onStop, starting,
+  selectedTypes, setSelectedTypes, recommendations, architectures = [], datasets = [],
+}) {
+  const selectedNames = selectedTypes.map((type) =>
+    architectures.find((arch) => arch.model_type === type)?.display_name || type
+  );
 
   return (
     <div className="space-y-6">
@@ -399,7 +402,7 @@ function TrainingPanel({ config, setConfig, telemetry, customModels, onStart, on
           <div>
             <h3 className="text-sm font-bold text-slate-900">Training Workbench</h3>
             <p className="text-xs text-slate-500">
-              Training target: <span className="font-semibold text-slate-700">{selectedArch?.display_name || config.model_type}</span> on <span className="font-semibold text-slate-700">{config.dataset_id}</span>
+              Training target: <span className="font-semibold text-slate-700">{selectedNames.join(', ') || 'Select an architecture'}</span> on <span className="font-semibold text-slate-700">{config.dataset_id}</span>
             </p>
           </div>
         </div>
@@ -427,28 +430,27 @@ function TrainingPanel({ config, setConfig, telemetry, customModels, onStart, on
       <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex items-center justify-between mb-3">
           <div>
-            <p className="text-sm font-semibold text-slate-800">1. Select Target Architecture</p>
-            <p className="text-xs text-slate-500">Pick from genuine supported PyTorch models for training.</p>
+            <p className="text-sm font-semibold text-slate-800">1. Select Architectures</p>
+            <p className="text-xs text-slate-500">Select one or more architectures. Jobs run in parallel using the settings below.</p>
           </div>
           <span className="text-xs font-medium text-blue-600 bg-blue-50 px-2.5 py-1 rounded-full">
-            {architectures.length} architectures available
+            {selectedTypes.length} selected
           </span>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {architectures.map((arch) => {
-            const isSelected = config.model_type === arch.model_type;
+            const isSelected = selectedTypes.includes(arch.model_type);
             return (
               <button
                 key={arch.model_type}
                 type="button"
-                onClick={() => {
-                  setConfig({
-                    ...config,
-                    model_type: arch.model_type,
-                    image_size: arch.input_size
-                  });
-                }}
+                aria-pressed={isSelected}
+                onClick={() => setSelectedTypes((types) =>
+                  types.includes(arch.model_type)
+                    ? types.filter((type) => type !== arch.model_type)
+                    : [...types, arch.model_type]
+                )}
                 className={`p-3.5 rounded-xl border text-left transition-all ${
                   isSelected
                     ? 'border-blue-500 bg-blue-50/70 ring-2 ring-blue-200 shadow-sm'
@@ -517,17 +519,6 @@ function TrainingPanel({ config, setConfig, telemetry, customModels, onStart, on
 
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           <label className="text-sm font-medium text-slate-700">
-            Model Architecture
-            <select className={fieldClass} value={config.model_type} onChange={(e) => setConfig({ ...config, model_type: e.target.value })}>
-              {architectures.map((arch) => (
-                <option key={arch.model_type} value={arch.model_type}>
-                  {arch.display_name} ({arch.category})
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="text-sm font-medium text-slate-700">
             Batch Size
             <input
               type="number"
@@ -581,9 +572,10 @@ function TrainingPanel({ config, setConfig, telemetry, customModels, onStart, on
             Image Size (px)
             <select
               className={fieldClass}
-              value={currentImageSize}
-              onChange={(e) => setConfig({ ...config, image_size: Number(e.target.value) })}
+              value={config.image_size ?? ''}
+              onChange={(e) => setConfig({ ...config, image_size: e.target.value ? Number(e.target.value) : null })}
             >
+              <option value="">Architecture default</option>
               <option value="128">128 × 128 (Ultra Fast / Low RAM)</option>
               <option value="224">224 × 224 (Standard ImageNet)</option>
               <option value="256">256 × 256 (High Resolution)</option>
@@ -633,115 +625,28 @@ function TrainingPanel({ config, setConfig, telemetry, customModels, onStart, on
           <div className="flex gap-3">
             <button
               onClick={onStart}
-              disabled={['RUNNING', 'PAUSED'].includes(telemetry?.status)}
+              disabled={starting || selectedTypes.length === 0}
               className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300 flex items-center gap-1.5 shadow-sm"
             >
-              <FlaskConical className="w-4 h-4" /> Start Training
-            </button>
-            <button
-              onClick={onStop}
-              disabled={!['RUNNING', 'PAUSED'].includes(telemetry?.status)}
-              className="rounded-lg border border-red-200 bg-white px-5 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Stop
+              <FlaskConical className="w-4 h-4" />
+              {starting ? 'Starting…' : selectedTypes.length > 1 ? `Train ${selectedTypes.length} Models` : 'Start Training'}
             </button>
           </div>
         </div>
       </div>
 
-      {/* live telemetry & epoch-wise loss / accuracy curve */}
-      {telemetry && (
-        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-blue-600" />
-              <p className="text-sm font-semibold text-slate-800">Training Progress & Loss Telemetry</p>
-            </div>
-            <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
-              telemetry.status === 'RUNNING'   ? 'bg-blue-50 text-blue-700 animate-pulse'   :
-              telemetry.status === 'COMPLETED' ? 'bg-green-50 text-green-700' :
-              telemetry.status === 'FAILED'    ? 'bg-red-50 text-red-700'     :
-              telemetry.status === 'STOPPED'   ? 'bg-amber-50 text-amber-700' :
-              'bg-slate-100 text-slate-600'
-            }`}>{telemetry.status}</span>
-          </div>
-
-          <div className="space-y-1">
-            <div className="flex justify-between text-xs text-slate-500">
-              <span>Overall Progress</span>
-              <span>{telemetry.progress_pct || 0}% (Epoch {telemetry.current_epoch}/{telemetry.total_epochs})</span>
-            </div>
-            <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
-              <div className="h-full bg-blue-600 transition-all duration-300" style={{ width: `${telemetry.progress_pct || 0}%` }} />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-3 gap-3 text-xs md:grid-cols-6">
-            {[
-              { label: 'Current Epoch',  value: `${telemetry.current_epoch} / ${telemetry.total_epochs}` },
-              { label: 'Train Loss',     value: telemetry.train_loss != null ? telemetry.train_loss.toFixed(4) : '—' },
-              { label: 'Val Loss',       value: telemetry.val_loss != null ? telemetry.val_loss.toFixed(4) : '—' },
-              { label: 'Train Accuracy', value: telemetry.train_acc != null ? `${telemetry.train_acc.toFixed(1)}%` : '—' },
-              { label: 'Val Accuracy',   value: telemetry.val_acc != null ? `${telemetry.val_acc.toFixed(1)}%` : '—' },
-              { label: 'Elapsed Time',   value: `${telemetry.elapsed_seconds ?? 0}s` },
-            ].map((m) => (
-              <div key={m.label} className="rounded-lg bg-slate-50 border border-slate-100 p-2.5 text-center">
-                <p className="text-slate-500 text-[11px]">{m.label}</p>
-                <p className="mt-1 font-bold text-slate-900 text-sm font-mono">{m.value}</p>
-              </div>
-            ))}
-          </div>
-
-          {/* Epoch-wise Loss Graph */}
-          {trainingHist.length > 0 && (
-            <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-semibold text-slate-700">Epoch-wise Loss & Accuracy Curve</span>
-                <span className="text-slate-400 font-mono">{trainingHist.length} recorded epochs</span>
-              </div>
-              <div className="h-52 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={trainingHist} margin={{ top: 10, right: 20, bottom: 5, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="epoch" tick={{ fontSize: 11 }} label={{ value: 'Epoch', position: 'insideBottom', offset: -2, fontSize: 10 }} />
-                    <YAxis yAxisId="loss" tick={{ fontSize: 11 }} label={{ value: 'Loss', angle: -90, position: 'insideLeft', fontSize: 10 }} />
-                    <YAxis yAxisId="acc" orientation="right" unit="%" tick={{ fontSize: 11 }} domain={[0, 100]} />
-                    <Tooltip contentStyle={{ fontSize: '11px', borderRadius: '8px' }} />
-                    <Legend wrapperStyle={{ fontSize: '11px' }} />
-                    <Line yAxisId="loss" type="monotone" dataKey="train_loss" name="Train Loss" stroke="#ef4444" strokeWidth={2} dot={{ r: 3 }} />
-                    <Line yAxisId="loss" type="monotone" dataKey="val_loss" name="Val Loss" stroke="#f97316" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="4 4" />
-                    <Line yAxisId="acc" type="monotone" dataKey="val_acc" name="Val Acc (%)" stroke="#2563eb" strokeWidth={2} dot={{ r: 3 }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          )}
-
-          {telemetry.error_message && (
-            <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3">
-              <XCircle className="h-4 w-4 shrink-0 text-red-600 mt-0.5" />
-              <p className="text-xs text-red-700">{telemetry.error_message}</p>
-            </div>
-          )}
-
-          {telemetry.candidate_model_id && (
-            <div className="rounded-lg border border-green-200 bg-green-50 px-3.5 py-2.5 flex items-center justify-between">
-              <div>
-                <p className="text-xs font-semibold text-green-800">Candidate Model Ready in Session RAM</p>
-                <p className="text-xs font-mono text-green-700 mt-0.5 truncate">{telemetry.candidate_model_id}</p>
-              </div>
-              <span className="text-[10px] bg-green-200/70 text-green-800 font-semibold px-2 py-0.5 rounded-full">
-                Inference Ready
-              </span>
-            </div>
-          )}
-
-          {telemetry.logs?.length > 0 && (
-            <div className="max-h-40 overflow-auto rounded-xl bg-slate-950 p-3 font-mono text-[11px] text-slate-100 leading-relaxed shadow-inner">
-              {telemetry.logs.map((line, i) => <div key={i}>{line}</div>)}
-            </div>
-          )}
-        </div>
+      {jobs.length > 0 && (
+        <section className="space-y-4" aria-label="Training jobs">
+          <h3 className="text-sm font-bold text-slate-900">Training Jobs</h3>
+          {jobs.map((job) => (
+            <TrainingJob
+              key={job.job_id}
+              telemetry={job}
+              name={architectures.find((arch) => arch.model_type === job.config.model_type)?.display_name || job.config.model_type}
+              onStop={onStop}
+            />
+          ))}
+        </section>
       )}
 
       {/* session candidate models */}
@@ -778,11 +683,130 @@ function TrainingPanel({ config, setConfig, telemetry, customModels, onStart, on
   );
 }
 
+function TrainingJob({ telemetry, name, onStop }) {
+  const trainingHist = telemetry.history || [];
+  const [requestingStop, setRequestingStop] = useState(false);
+  const stopping = telemetry.status === 'RUNNING' && (requestingStop || telemetry.stop_requested);
+
+  const stop = async () => {
+    setRequestingStop(true);
+    if (!(await onStop(telemetry.job_id))) setRequestingStop(false);
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <TrendingUp className="w-4 h-4 text-blue-600" />
+          <div>
+            <h4 className="text-sm font-semibold text-slate-800">{name}</h4>
+            <p className="text-xs text-slate-500">{telemetry.config.dataset_id} · {telemetry.job_id}</p>
+          </div>
+        </div>
+        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+          telemetry.status === 'RUNNING'   ? 'bg-blue-50 text-blue-700 animate-pulse'   :
+          telemetry.status === 'COMPLETED' ? 'bg-green-50 text-green-700' :
+          telemetry.status === 'FAILED'    ? 'bg-red-50 text-red-700'     :
+          telemetry.status === 'STOPPED'   ? 'bg-amber-50 text-amber-700' :
+          'bg-slate-100 text-slate-600'
+        }`}>{stopping ? 'Stopping…' : telemetry.status}</span>
+        {telemetry.status === 'RUNNING' && (
+          <button
+            type="button"
+            onClick={stop}
+            disabled={stopping}
+            className="rounded-lg border border-red-200 px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+          >
+            Stop
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-1">
+        <div className="flex justify-between text-xs text-slate-500">
+          <span>Overall Progress</span>
+          <span>{telemetry.progress_pct || 0}% (Epoch {telemetry.current_epoch}/{telemetry.total_epochs})</span>
+        </div>
+        <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
+          <div className="h-full bg-blue-600 transition-all duration-300" style={{ width: `${telemetry.progress_pct || 0}%` }} />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-xs md:grid-cols-6">
+        {[
+          { label: 'Current Epoch',  value: `${telemetry.current_epoch} / ${telemetry.total_epochs}` },
+          { label: 'Train Loss',     value: telemetry.train_loss != null ? telemetry.train_loss.toFixed(4) : '—' },
+          { label: 'Val Loss',       value: telemetry.val_loss != null ? telemetry.val_loss.toFixed(4) : '—' },
+          { label: 'Train Accuracy', value: telemetry.train_acc != null ? `${telemetry.train_acc.toFixed(1)}%` : '—' },
+          { label: 'Val Accuracy',   value: telemetry.val_acc != null ? `${telemetry.val_acc.toFixed(1)}%` : '—' },
+          { label: 'Elapsed Time',   value: `${telemetry.elapsed_seconds ?? 0}s` },
+        ].map((m) => (
+          <div key={m.label} className="rounded-lg bg-slate-50 border border-slate-100 p-2.5 text-center">
+            <p className="text-slate-500 text-[11px]">{m.label}</p>
+            <p className="mt-1 font-bold text-slate-900 text-sm font-mono">{m.value}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Epoch-wise Loss Graph */}
+      {trainingHist.length > 0 && (
+        <div className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-semibold text-slate-700">Epoch-wise Loss & Accuracy Curve</span>
+            <span className="text-slate-400 font-mono">{trainingHist.length} recorded epochs</span>
+          </div>
+          <div className="h-52 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={trainingHist} margin={{ top: 10, right: 20, bottom: 5, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="epoch" tick={{ fontSize: 11 }} label={{ value: 'Epoch', position: 'insideBottom', offset: -2, fontSize: 10 }} />
+                <YAxis yAxisId="loss" tick={{ fontSize: 11 }} label={{ value: 'Loss', angle: -90, position: 'insideLeft', fontSize: 10 }} />
+                <YAxis yAxisId="acc" orientation="right" unit="%" tick={{ fontSize: 11 }} domain={[0, 100]} />
+                <Tooltip contentStyle={{ fontSize: '11px', borderRadius: '8px' }} />
+                <Legend wrapperStyle={{ fontSize: '11px' }} />
+                <Line yAxisId="loss" type="monotone" dataKey="train_loss" name="Train Loss" stroke="#ef4444" strokeWidth={2} dot={{ r: 3 }} />
+                <Line yAxisId="loss" type="monotone" dataKey="val_loss" name="Val Loss" stroke="#f97316" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="4 4" />
+                <Line yAxisId="acc" type="monotone" dataKey="val_acc" name="Val Acc (%)" stroke="#2563eb" strokeWidth={2} dot={{ r: 3 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      {telemetry.error_message && (
+        <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3">
+          <XCircle className="h-4 w-4 shrink-0 text-red-600 mt-0.5" />
+          <p className="text-xs text-red-700">{telemetry.error_message}</p>
+        </div>
+      )}
+
+      {telemetry.candidate_model_id && (
+        <div className="rounded-lg border border-green-200 bg-green-50 px-3.5 py-2.5 flex items-center justify-between">
+          <div>
+            <p className="text-xs font-semibold text-green-800">Candidate Model Ready in Session RAM</p>
+            <p className="text-xs font-mono text-green-700 mt-0.5 truncate">{telemetry.candidate_model_id}</p>
+          </div>
+          <span className="text-[10px] bg-green-200/70 text-green-800 font-semibold px-2 py-0.5 rounded-full">
+            Inference Ready
+          </span>
+        </div>
+      )}
+
+      {telemetry.logs?.length > 0 && (
+        <div className="max-h-40 overflow-auto rounded-xl bg-slate-950 p-3 font-mono text-[11px] text-slate-100 leading-relaxed shadow-inner">
+          {telemetry.logs.map((line, i) => <div key={i}>{line}</div>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 /* ─── main page ───────────────────────────────────────────────────────────── */
 const TABS = [
   { id: 'datasets',  label: 'Datasets',          icon: Database    },
   { id: 'upload',    label: 'Upload Dataset',     icon: UploadCloud },
-  { id: 'training',  label: 'Train a Model',      icon: FlaskConical },
+  { id: 'training',  label: 'Train Models',      icon: FlaskConical },
 ];
 
 export default function DataTrain() {
@@ -793,16 +817,17 @@ export default function DataTrain() {
   const [info,         setInfo]         = useState(null);
   const [infoLoading,  setInfoLoading]  = useState(false);
   const [recommendations, setRec]       = useState(null);
-  const [telemetry,    setTelemetry]    = useState(null);
+  const [jobs, setJobs] = useState([]);
+  const [starting, setStarting] = useState(false);
+  const [selectedTypes, setSelectedTypes] = useState(['mobilenet_v3_small']);
   const [customModels, setCustomModels] = useState([]);
   const [error,        setError]        = useState('');
   const [uploading,    setUploading]    = useState(false);
   const [uploadPct,    setUploadPct]    = useState(0);
   const [uploadResult, setUploadResult] = useState(null);
-  const pollRef = useRef(null);
 
   const [config, setConfig] = useState({
-    model_type: 'mobilenet_v3_small', dataset_id: 'cifar10', epochs: 3, batch_size: 4,
+    dataset_id: 'cifar10', epochs: 3, batch_size: 4,
     learning_rate: 0.001, optimizer_type: 'adam', device_selection: 'auto',
     val_split: 0.15, train_limit: 500,
   });
@@ -848,26 +873,44 @@ export default function DataTrain() {
     finally { setInfoLoading(false); }
   }, []);
 
-  const refreshTraining = useCallback(async () => {
-    try {
-      const data = await api.getTrainingStatus();
-      setTelemetry(data.telemetry);
-      if (['COMPLETED', 'STOPPED', 'FAILED'].includes(data.telemetry?.status)) {
-        api.getCustomModels().then((r) => setCustomModels(r.models || [])).catch(() => {});
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    } catch (e) { setError(e.message); }
-  }, []);
-
   useEffect(() => {
     loadDatasets();
     loadArchitectures();
-    api.getCustomModels().then((d) => setCustomModels(d.models || [])).catch(() => {});
     api.getTrainingRecommendations().then(setRec).catch(() => {});
-    refreshTraining();
-    return () => clearInterval(pollRef.current);
-  }, []);
+  }, [loadDatasets, loadArchitectures]);
+
+  useEffect(() => {
+    if (tab !== 'training') return;
+    let cancelled = false;
+    let timer;
+    let finishedRuns;
+
+    const poll = async () => {
+      try {
+        const data = await api.listTrainingJobs();
+        if (cancelled) return;
+        setJobs([...data.jobs].reverse());
+
+        const runIds = data.jobs.map((job) => job.candidate_model_id).filter(Boolean).join(',');
+        if (runIds !== finishedRuns) {
+          const candidates = await api.getCustomModels();
+          if (cancelled) return;
+          setCustomModels(candidates.models || []);
+          finishedRuns = runIds;
+        }
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, 1500);
+      }
+    };
+
+    poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [tab]);
 
   useEffect(() => { inspect(selected); }, [selected]);
 
@@ -906,16 +949,31 @@ export default function DataTrain() {
   /* ── training actions ────────────────────────────────────────────── */
   const startTraining = async () => {
     setError('');
+    setStarting(true);
     try {
-      await api.startTraining(config);
-      await refreshTraining();
-      if (!pollRef.current) pollRef.current = setInterval(refreshTraining, 2000);
-    } catch (e) { setError(e.message); }
+      const results = await Promise.allSettled(selectedTypes.map((model_type) =>
+        api.startTrainingJob({ ...config, model_type })
+      ));
+      const errors = results.flatMap((result, index) => {
+        if (result.status === 'fulfilled') return [];
+        const type = selectedTypes[index];
+        const name = architectures.find((arch) => arch.model_type === type)?.display_name || type;
+        return [`${name} could not start. ${result.reason.message}`];
+      });
+      if (errors.length) setError(errors.join(' '));
+    } finally {
+      setStarting(false);
+    }
   };
 
-  const stopTraining = async () => {
-    try { await api.stopTraining(); await refreshTraining(); }
-    catch (e) { setError(e.message); }
+  const stopTraining = async (jobId) => {
+    try {
+      const result = await api.stopJob(jobId);
+      return result.success;
+    } catch (e) {
+      setError(e.message);
+      return false;
+    }
   };
 
   const cifar10 = datasets.find((d) => d.id === 'cifar10');
@@ -1063,7 +1121,10 @@ export default function DataTrain() {
         <TrainingPanel
           config={config}
           setConfig={setConfig}
-          telemetry={telemetry}
+          jobs={jobs}
+          starting={starting}
+          selectedTypes={selectedTypes}
+          setSelectedTypes={setSelectedTypes}
           customModels={customModels}
           onStart={startTraining}
           onStop={stopTraining}

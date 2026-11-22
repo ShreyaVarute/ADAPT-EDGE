@@ -51,6 +51,7 @@ class ErrorBoundary extends Component {
 
 // Pages
 import Overview from './pages/Overview';
+import Novelties from './pages/Novelties';
 import DataTrain from './pages/DataTrain';
 import LiveDemo from './pages/LiveDemo';
 import Benchmarking from './pages/Benchmarking';
@@ -70,6 +71,8 @@ export default function App() {
     switch (activeTab) {
       case 'overview':
         return <Overview key={refreshKey} setActiveTab={setActiveTab} />;
+      case 'novelties':
+        return <Novelties key={refreshKey} />;
       case 'datatrain':
         return <DataTrain key={refreshKey} />;
       case 'livedemo':

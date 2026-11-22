@@ -18,3 +18,5 @@ torchvision
 fastapi
 uvicorn[standard]
 python-multipart
+python-dotenv
+boto3[crt]>=1.41.0

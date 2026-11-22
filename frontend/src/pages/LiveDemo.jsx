@@ -19,6 +19,22 @@ export default function LiveDemo() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [cloudResult, setCloudResult] = useState(null);
+  const [cloudError, setCloudError] = useState('');
+  const [cloudLoading, setCloudLoading] = useState(false);
+
+  const runCloudTest = async (indices) => {
+    setCloudLoading(true);
+    setCloudError('');
+    setCloudResult(null);
+    try {
+      setCloudResult(await api.testCloudAccuracy(indices));
+    } catch (err) {
+      setCloudError(err.message);
+    } finally {
+      setCloudLoading(false);
+    }
+  };
 
   // Model A / Model B Pair Configuration State
   const [pairConfig, setPairConfig] = useState({
@@ -343,6 +359,70 @@ export default function LiveDemo() {
       </section>
 
       {/* ── SECTION 2: LIVE INFERENCE PIPELINE RUNNER ── */}
+      <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-bold text-slate-900">Black-Box Cloud Accuracy</h2>
+            <p className="text-xs text-slate-600">
+              Sends CIFAR-10 images to Amazon Rekognition. Each image uses one API request. AWS charges may apply.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={cloudLoading || refreshing || samples.length === 0}
+              onClick={() => runCloudTest([selectedIndex ?? samples[0].index])}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {cloudLoading ? 'Testing...' : 'Test one image'}
+            </button>
+            <button
+              type="button"
+              disabled={cloudLoading || refreshing || samples.length < 2}
+              onClick={() => runCloudTest(samples.map((sample) => sample.index))}
+              className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {cloudLoading ? 'Testing...' : `Test ${samples.length} gallery images`}
+            </button>
+          </div>
+        </div>
+        <p className="text-xs text-slate-500">
+          The highest-scoring cloud label that maps to a CIFAR-10 class is compared with the dataset label.
+          Images with no mapped label count as incorrect.
+        </p>
+        {cloudError && <p role="alert" className="text-sm text-red-700">{cloudError}</p>}
+        {cloudResult && (
+          <div aria-live="polite" className="space-y-2">
+            <p className="text-sm font-semibold text-slate-900">
+              {cloudResult.accuracy_pct}% sample accuracy ({cloudResult.correct}/{cloudResult.total})
+              {' | '}{cloudResult.batch_latency_ms} ms total cloud test time
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="bg-slate-50 text-slate-600">
+                    {['Image ID', 'Actual', 'Prediction', 'Result', 'Cloud labels'].map((label) => (
+                      <th key={label} scope="col" className="p-2">{label}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {cloudResult.rows.map((row) => (
+                    <tr key={row.index} className="border-t border-slate-100">
+                      <td className="p-2">{row.index}</td>
+                      <td className="p-2">{row.actual}</td>
+                      <td className="p-2">{row.prediction ?? 'Unmapped'}</td>
+                      <td className="p-2">{row.correct ? 'Correct' : 'Incorrect'}</td>
+                      <td className="p-2">{row.cloud_labels.join(', ')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </section>
+
       <section className="grid gap-6 lg:grid-cols-[380px_1fr]">
         <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
           <h2 className="font-bold text-slate-900">Inference Input</h2>

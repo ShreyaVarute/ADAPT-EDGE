@@ -423,36 +423,38 @@ export default function Results() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-mono">
-              {(rawStrategies.length > 0 ? rawStrategies : [
-                { strategy: 'Model A (MobileNetV3-S)', accuracy: 88.60, macro_f1: 0.8841, mean_latency_ms: 1.488, p95_latency_ms: 2.115, p99_latency_ms: 2.89, full_model_b_pct: 0.0, tag: 'Fast' },
-                { strategy: 'Model B (MobileNetV3-L)', accuracy: 92.50, macro_f1: 0.9248, mean_latency_ms: 3.757, p95_latency_ms: 4.602, p99_latency_ms: 5.72, full_model_b_pct: 100.0, tag: 'Heavy' },
-                { strategy: 'Conventional Switching', accuracy: 92.50, macro_f1: 0.9248, mean_latency_ms: 4.148, p95_latency_ms: 5.120, p99_latency_ms: 6.45, full_model_b_pct: 31.6, tag: 'Wasteful' },
-                { strategy: 'ADAPT-EDGE (Uncached)', accuracy: 91.80, macro_f1: 0.9175, mean_latency_ms: 2.894, p95_latency_ms: 3.650, p99_latency_ms: 4.90, full_model_b_pct: 10.8, tag: 'Probed' },
-                { strategy: 'ADAPT-EDGE (Cached - Ours)', accuracy: 91.90, macro_f1: 0.9186, mean_latency_ms: 2.613, p95_latency_ms: 3.320, p99_latency_ms: 4.12, full_model_b_pct: 10.8, tag: 'Optimal' },
-              ]).map((row, i) => {
-                const isOurs = (row.strategy || '').includes('Cached') || (row.strategy || '').includes('ADAPT');
-                return (
-                  <tr key={i} className={`hover:bg-slate-50/70 ${isOurs ? 'bg-blue-50/40 font-semibold text-blue-950' : 'text-slate-800'}`}>
-                    <td className="py-2.5 px-3.5 font-sans font-medium flex items-center gap-1.5">
-                      {isOurs && <Sparkles className="w-3.5 h-3.5 text-blue-600" />}
-                      {row.strategy}
-                    </td>
-                    <td className="px-3.5">{typeof row.accuracy === 'number' ? `${row.accuracy.toFixed(2)}%` : row.accuracy}</td>
-                    <td className="px-3.5">{typeof row.macro_f1 === 'number' ? row.macro_f1.toFixed(4) : (row.macro_f1 || '—')}</td>
-                    <td className="px-3.5">{row.mean_latency_ms != null ? `${row.mean_latency_ms} ms` : '—'}</td>
-                    <td className="px-3.5 text-amber-700 font-bold">{row.p95_latency_ms != null ? `${row.p95_latency_ms} ms` : '—'}</td>
-                    <td className="px-3.5 text-slate-500">{row.p99_latency_ms != null ? `${row.p99_latency_ms} ms` : '—'}</td>
-                    <td className="px-3.5 text-slate-600">{row.full_model_b_pct != null ? `${row.full_model_b_pct}%` : '—'}</td>
-                    <td className="px-3.5 font-sans">
-                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                        isOurs ? 'bg-blue-100 text-blue-800' : 'bg-slate-100 text-slate-600'
-                      }`}>
-                        {row.tag || 'Standard'}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
+              {rawStrategies.length > 0 ? (
+                rawStrategies.map((row, i) => {
+                  const isOurs = (row.strategy || '').includes('Cached') || (row.strategy || '').includes('ADAPT');
+                  return (
+                    <tr key={i} className={`hover:bg-slate-50/70 ${isOurs ? 'bg-blue-50/40 font-semibold text-blue-950' : 'text-slate-800'}`}>
+                      <td className="py-2.5 px-3.5 font-sans font-medium flex items-center gap-1.5">
+                        {isOurs && <Sparkles className="w-3.5 h-3.5 text-blue-600" />}
+                        {row.strategy}
+                      </td>
+                      <td className="px-3.5">{typeof row.accuracy === 'number' ? `${row.accuracy.toFixed(2)}%` : row.accuracy}</td>
+                      <td className="px-3.5">{typeof row.macro_f1 === 'number' ? row.macro_f1.toFixed(4) : (row.macro_f1 || '—')}</td>
+                      <td className="px-3.5">{row.mean_latency_ms != null ? `${row.mean_latency_ms} ms` : '—'}</td>
+                      <td className="px-3.5 text-amber-700 font-bold">{row.p95_latency_ms != null ? `${row.p95_latency_ms} ms` : '—'}</td>
+                      <td className="px-3.5 text-slate-500">{row.p99_latency_ms != null ? `${row.p99_latency_ms} ms` : '—'}</td>
+                      <td className="px-3.5 text-slate-600">{row.full_model_b_pct != null ? `${row.full_model_b_pct}%` : '—'}</td>
+                      <td className="px-3.5 font-sans">
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                          isOurs ? 'bg-blue-100 text-blue-800' : 'bg-slate-100 text-slate-600'
+                        }`}>
+                          {row.tag || 'Standard'}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr>
+                  <td colSpan={8} className="py-8 text-center text-slate-400 font-sans">
+                    No benchmark runs recorded yet. Execute a benchmark in the Benchmarking tab to view actual hardware telemetry.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

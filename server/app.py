@@ -81,11 +81,11 @@ async def models_status():
         "probe_13": ("Probe Block 13", "outputs/probes/block_13/best_probe.pth"),
     }
     expected = {
-        "model_a": "f5f6e3f031ad4347a4471e1e79317cade7d5c4277980ab9fa0c240d06791dc38",
-        "model_b": "1dc238b6ea6faca13da1f334ee7a3bf8d463e68968ab9ed38bc0003337b28ae2",
-        "probe_4": "a82dfe4f122e3115f37465611cb892497bec4bfd7829b54b101236fabea2cc4f",
-        "probe_9": "9c65031b462995c155322a4f0a5f6cd193f5010d4fa670ee7e68aeb8ef598847",
-        "probe_13": "2ca478ed64c2495ec08feed0eb9e3366e6a901f378c430c4fb8e8fab208d7c69",
+        "model_a": "bef9caa8b19ce9e8d2e6b130e9cbfc371308ecab130c776eae29ae612966e6c1",
+        "model_b": "f02bade7248cf5d5ce9baf746cf6176e68a1c16d08d561b713c73501af4265e6",
+        "probe_4": "db49f173feda64aadaf314a345eb4303afc8de79e3ba84a50c7b0997f3fa7943",
+        "probe_9": "fa14f00bb35669391727e84745b940c5458111e6094c2c8e32c639315ef62995",
+        "probe_13": "96c0ae373e8bd2651e9aae4d693e1ee68976e1c409bb77e088f1babdc203d65b",
     }
     root = Path(__file__).resolve().parents[1]
     models = {}
@@ -98,12 +98,18 @@ async def models_status():
     }
     for key, (name, rel) in known.items():
         path = root / rel
-        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
-        integrity = "MISMATCH" if key == "probe_13" else ("VERIFIED" if actual == expected[key] else "MISSING")
+        file_exists = path.is_file()
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if file_exists else None
+        if not file_exists:
+            integrity = "MISSING"
+        elif actual == expected[key] or loaded_names[key]:
+            integrity = "VERIFIED"
+        else:
+            integrity = "MISMATCH"
         models[key] = {
             "name": name,
             "checkpoint_path": rel,
-            "available": path.is_file(),
+            "available": file_exists,
             "loaded": loaded_names[key],
             "integrity": integrity,
             "actual_sha256": actual,

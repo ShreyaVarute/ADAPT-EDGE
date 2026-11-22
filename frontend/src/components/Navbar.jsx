@@ -38,6 +38,7 @@ export default function Navbar({ activeTab, onRefresh, onToggleSidebar }) {
 
   const pageTitles = {
     overview: { title: 'Executive Overview', desc: 'System architecture, baseline comparison and live status' },
+    novelties: { title: 'Research Novelties & Architectural Innovations', desc: 'Core scientific breakthroughs, architectural novelties, and empirical gains' },
     datatrain: { title: 'Dataset & Training', desc: 'Upload a ZIP dataset & start model training' },
     livedemo: { title: 'Live Demo', desc: 'Interactively run inference on the edge model' },
     benchmarking: { title: 'Benchmarking', desc: 'Black-box and edge architecture performance benchmarking' },

@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   LayoutDashboard,
+  Sparkles,
   Database,
   Zap,
   Activity,
@@ -14,6 +15,7 @@ export default function Sidebar({ activeTab, setActiveTab, isOpen, onClose }) {
       title: 'MAIN',
       items: [
         { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+        { id: 'novelties', label: 'Research Novelties', icon: Sparkles, badge: 'New' },
         { id: 'datatrain', label: 'Dataset & Training', icon: Database },
         { id: 'livedemo', label: 'Live Demo', icon: Zap },
         { id: 'benchmarking', label: 'Benchmarking', icon: Activity },
@@ -66,9 +68,14 @@ export default function Sidebar({ activeTab, setActiveTab, isOpen, onClose }) {
                   }`}
                 >
                   <div className="flex items-center space-x-2.5 truncate">
-                    <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-cyan-400' : 'text-primary'}`} />
+                    <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-blue-600' : 'text-slate-500'}`} />
                     <span className="truncate">{item.label}</span>
                   </div>
+                  {item.badge && (
+                    <span className="text-[9px] font-bold px-1.5 py-0.2 rounded-full bg-blue-100 text-blue-700 font-sans">
+                      {item.badge}
+                    </span>
+                  )}
                 </button>
               );
             })}

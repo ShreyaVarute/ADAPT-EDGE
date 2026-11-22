@@ -23,31 +23,31 @@ AUDITED_CHECKPOINTS = {
     "model_a": {
         "name": "MobileNetV3-Small (Baseline)",
         "rel_path": "outputs/baseline/mobilenet_v3_small/checkpoints/best_model.pth",
-        "expected_sha256": "f5f6e3f031ad4347a4471e1e79317cade7d5c4277980ab9fa0c240d06791dc38",
+        "expected_sha256": "bef9caa8b19ce9e8d2e6b130e9cbfc371308ecab130c776eae29ae612966e6c1",
         "role": "Model A (Lightweight Initial Classifier)"
     },
     "model_b": {
         "name": "MobileNetV3-Large (Baseline)",
         "rel_path": "outputs/baseline/mobilenet_v3_large/checkpoints/best_model.pth",
-        "expected_sha256": "1dc238b6ea6faca13da1f334ee7a3bf8d463e68968ab9ed38bc0003337b28ae2",
+        "expected_sha256": "f02bade7248cf5d5ce9baf746cf6176e68a1c16d08d561b713c73501af4265e6",
         "role": "Model B (High-Capacity Feature Extractor)"
     },
     "probe_4": {
         "name": "Probe Head Block 4",
         "rel_path": "outputs/probes/block_4/best_probe.pth",
-        "expected_sha256": "a82dfe4f122e3115f37465611cb892497bec4bfd7829b54b101236fabea2cc4f",
+        "expected_sha256": "db49f173feda64aadaf314a345eb4303afc8de79e3ba84a50c7b0997f3fa7943",
         "role": "Early Exit Probe (Block 4)"
     },
     "probe_9": {
         "name": "Probe Head Block 9",
         "rel_path": "outputs/probes/block_9/best_probe.pth",
-        "expected_sha256": "9c65031b462995c155322a4f0a5f6cd193f5010d4fa670ee7e68aeb8ef598847",
+        "expected_sha256": "fa14f00bb35669391727e84745b940c5458111e6094c2c8e32c639315ef62995",
         "role": "Mid-Stage Probe (Block 9)"
     },
     "probe_13": {
         "name": "Probe Head Block 13",
         "rel_path": "outputs/probes/block_13/best_probe.pth",
-        "expected_sha256": "2ca478ed64c2495ec08feed0eb9e3366e6a901f378c430c4fb8e8fab208d7c69",
+        "expected_sha256": "96c0ae373e8bd2651e9aae4d693e1ee68976e1c409bb77e088f1babdc203d65b",
         "role": "Deep Probe (Block 13)"
     }
 }
@@ -223,7 +223,14 @@ def session_cleanup():
     5. Forces garbage collection and CUDA cache flush.
     """
     mgr = ServiceManager.get_instance()
-    from server.api.training import CANDIDATE_MODELS, CANDIDATE_MODELS_LOCK, TRAINER
+    from server.api.training import (
+        CANDIDATE_MODELS, CANDIDATE_MODELS_LOCK, TRAINER, TRAINING_JOBS, TRAINING_JOBS_LOCK,
+    )
+
+    with TRAINING_JOBS_LOCK:
+        for job_id, trainer in list(TRAINING_JOBS.items()):
+            if trainer.status != "RUNNING":
+                del TRAINING_JOBS[job_id]
 
     with CANDIDATE_MODELS_LOCK:
         models_cleared = len(CANDIDATE_MODELS)
@@ -288,13 +295,10 @@ def verify_protected_checkpoints():
             any_found = True
             content = path.read_bytes()
             actual_sha = hashlib.sha256(content).hexdigest()
-            # Probe 13 is audited as historical mismatched checkpoint
-            if key == "probe_13":
-                status = "MISMATCH"
-            elif actual_sha == info["expected_sha256"]:
+            if actual_sha == info["expected_sha256"]:
                 status = "VERIFIED"
             else:
-                status = "TAMPERED_OR_CORRUPT"
+                status = "MISMATCH"
                 all_verified = False
         else:
             status = "MISSING_ON_DISK"

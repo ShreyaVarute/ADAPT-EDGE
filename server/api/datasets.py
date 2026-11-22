@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/datasets", tags=["Datasets"])
 
 CUSTOM_ROOT = PROJECT_ROOT / "data" / "custom_uploads"
 VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-MAX_ARCHIVE_BYTES = 200 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 500 * 1024 * 1024
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
 SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. ()-]{0,119}$")
 
@@ -204,7 +204,7 @@ def upload_custom_dataset(archive: UploadFile = File(...)):
 
     contents = archive.file.read(MAX_ARCHIVE_BYTES + 1)
     if len(contents) > MAX_ARCHIVE_BYTES:
-        raise HTTPException(status_code=400, detail="Archive exceeds 200 MB.")
+        raise HTTPException(status_code=400, detail="Archive exceeds 500 MB.")
 
     dataset_id = "ds_" + uuid.uuid4().hex
     dataset_root = (CUSTOM_ROOT / dataset_id).resolve()

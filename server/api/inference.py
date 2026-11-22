@@ -9,16 +9,21 @@ import io
 import threading
 import base64
 import copy
+import os
 from collections import deque
 from typing import Dict, Any, Optional
+import boto3
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError, ProfileNotFound
+from dotenv import dotenv_values
 from fastapi import APIRouter, File, UploadFile, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import torch
 import torch.nn.functional as F
 from PIL import Image, UnidentifiedImageError
 from torchvision import transforms
-from server.core import ServiceManager, CIFAR10_CLASSES
+from server.core import ServiceManager, CIFAR10_CLASSES, PROJECT_ROOT
 from server.api.training import CANDIDATE_MODELS, CANDIDATE_MODELS_LOCK
 from utils.profiling import synchronize
 
@@ -161,6 +166,87 @@ def refresh_sample_gallery(count: int = 12):
     return {"success": True, "count": len(samples), "samples": samples}
 
 
+# Rekognition returns open-vocabulary labels. These exact aliases define the
+# CIFAR-10 scoring rule independently of the test labels.
+CLOUD_LABEL_CLASSES = {
+    "airplane": "airplane", "aircraft": "airplane", "aeroplane": "airplane",
+    "automobile": "automobile", "car": "automobile", "passenger car": "automobile",
+    "bird": "bird", "cat": "cat", "kitten": "cat", "deer": "deer",
+    "dog": "dog", "puppy": "dog", "frog": "frog", "horse": "horse",
+    "ship": "ship", "boat": "ship", "truck": "truck", "pickup truck": "truck",
+}
+
+
+class CloudTestRequest(BaseModel):
+    sample_indices: list[int] = Field(min_length=1, max_length=12)
+
+
+@router.post("/cloud-test")
+def test_cloud_accuracy(req: CloudTestRequest):
+    """Evaluate Amazon Rekognition on explicitly selected CIFAR-10 test samples."""
+    dataset = ServiceManager.get_instance().cifar10_dataset
+    if dataset is None:
+        raise HTTPException(503, "The labeled CIFAR-10 test dataset is unavailable.")
+
+    indices = req.sample_indices
+    if len(set(indices)) != len(indices) or any(index < 0 or index >= len(dataset) for index in indices):
+        raise HTTPException(400, "Provide unique, valid CIFAR-10 test image indices.")
+
+    config = dotenv_values(PROJECT_ROOT / ".env", encoding="utf-8-sig", interpolate=False)
+    profile = os.environ.get("AWS_PROFILE") or config.get("AWS_PROFILE") or "adapt-edge"
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or config.get("AWS_REGION") or config.get("AWS_DEFAULT_REGION")
+    rows = []
+    start = time.perf_counter()
+    try:
+        session = boto3.Session(profile_name=profile)
+        with session.client(
+            "rekognition",
+            region_name=region or session.region_name or "us-east-1",
+            config=Config(connect_timeout=5, read_timeout=15, retries={"total_max_attempts": 1}),
+        ) as client:
+            for index in indices:
+                image, label = dataset[index]
+                actual = CIFAR10_CLASSES[label]
+                # CIFAR-10 is 32x32. Rekognition requires both dimensions to be at least 80px.
+                with io.BytesIO() as buffer:
+                    image.resize((96, 96), Image.Resampling.BILINEAR).save(buffer, format="PNG")
+                    response = client.detect_labels(
+                        Image={"Bytes": buffer.getvalue()},
+                        Features=["GENERAL_LABELS"],
+                        MaxLabels=10,
+                    )
+                labels = sorted(response.get("Labels", []), key=lambda item: item["Confidence"], reverse=True)
+                descriptions = [item["Name"] for item in labels]
+                mapped = (CLOUD_LABEL_CLASSES.get(name.casefold().strip()) for name in descriptions)
+                prediction = next((name for name in mapped if name is not None), None)
+                rows.append({
+                    "index": index, "actual": actual, "prediction": prediction,
+                    "correct": prediction == actual, "cloud_labels": descriptions,
+                })
+    except ProfileNotFound:
+        raise HTTPException(503, "AWS profile not found. Run aws login --profile adapt-edge or set AWS_PROFILE to your configured profile.") from None
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code in {"AccessDenied", "AccessDeniedException"}:
+            message = "Amazon Rekognition denied access. Verify that the AWS identity has rekognition:DetectLabels permission and the account can use Rekognition."
+        elif code in {"ExpiredToken", "ExpiredTokenException", "InvalidClientTokenId", "UnrecognizedClientException"}:
+            message = "AWS credentials expired or were rejected. Sign in again to the configured AWS profile."
+        elif code in {"ThrottlingException", "ProvisionedThroughputExceededException"}:
+            message = "Amazon Rekognition throttled the request. Check the account quota before retrying."
+        else:
+            message = "Amazon Rekognition rejected the request. Check AWS service access and region."
+        raise HTTPException(502, message) from None
+    except BotoCoreError:
+        raise HTTPException(503, "Unable to use AWS Rekognition. Verify the AWS profile login, region, and network connection.") from None
+    latency_ms = round((time.perf_counter() - start) * 1000, 1)
+
+    correct = sum(row["correct"] for row in rows)
+    return {
+        "correct": correct, "total": len(rows), "accuracy_pct": round(100 * correct / len(rows), 2),
+        "batch_latency_ms": latency_ms, "rows": rows,
+    }
+
+
 def execute_strategy(
     strategy: str,
     tensor: torch.Tensor,
@@ -185,17 +271,23 @@ def execute_strategy(
     model_a_id = active.get("model_a_id", "mobilenet_v3_small_baseline")
     model_b_id = active.get("model_b_id", "mobilenet_v3_large_baseline")
 
+    # Resolve class names: if custom candidate model is paired, use its custom class names!
+    class_names = CIFAR10_CLASSES
     if model_a_id != "mobilenet_v3_small_baseline":
         with CANDIDATE_MODELS_LOCK:
             cand_a = CANDIDATE_MODELS.get(model_a_id)
             if cand_a and "model" in cand_a:
                 model_a = cand_a["model"].to(device).eval()
+                if "class_names" in cand_a.get("metadata", {}):
+                    class_names = cand_a["metadata"]["class_names"]
 
     if model_b_id != "mobilenet_v3_large_baseline":
         with CANDIDATE_MODELS_LOCK:
             cand_b = CANDIDATE_MODELS.get(model_b_id)
             if cand_b and "model" in cand_b:
                 model_b = cand_b["model"].to(device).eval()
+                if class_names == CIFAR10_CLASSES and "class_names" in cand_b.get("metadata", {}):
+                    class_names = cand_b["metadata"]["class_names"]
 
     strat = strategy.lower()
 
@@ -210,12 +302,13 @@ def execute_strategy(
         lat = (time.perf_counter() - t0) * 1000.0
 
         p_idx = int(pred.item())
+        pred_label = class_names[p_idx] if p_idx < len(class_names) else f"Class {p_idx}"
         return {
             "strategy": "Model A Baseline",
             "strategy_name": "Model A Baseline",
             "strategy_key": "MODEL_A",
             "prediction": p_idx,
-            "prediction_class": CIFAR10_CLASSES[p_idx],
+            "prediction_class": pred_label,
             "confidence": float(conf.item()),
             "latency_ms": lat,
             "decision": "CONFIDENT_RETAIN",
@@ -234,12 +327,13 @@ def execute_strategy(
         lat = (time.perf_counter() - t0) * 1000.0
 
         p_idx = int(pred.item())
+        pred_label = class_names[p_idx] if p_idx < len(class_names) else f"Class {p_idx}"
         return {
             "strategy": "Model B Baseline",
             "strategy_name": "Model B Baseline",
             "strategy_key": "MODEL_B",
             "prediction": p_idx,
-            "prediction_class": CIFAR10_CLASSES[p_idx],
+            "prediction_class": pred_label,
             "confidence": float(conf.item()),
             "latency_ms": lat,
             "decision": "SWITCH_MODEL_B",
@@ -260,12 +354,13 @@ def execute_strategy(
                 synchronize(device)
                 lat = (time.perf_counter() - t0) * 1000.0
                 p_idx = int(pred_a.item())
+                pred_label = class_names[p_idx] if p_idx < len(class_names) else f"Class {p_idx}"
                 return {
                     "strategy": "Conventional Switching",
                     "strategy_name": "Conventional Switching",
                     "strategy_key": "CONVENTIONAL",
                     "prediction": p_idx,
-                    "prediction_class": CIFAR10_CLASSES[p_idx],
+                    "prediction_class": pred_label,
                     "confidence": c_val,
                     "latency_ms": lat,
                     "decision": "RETAIN",
@@ -279,12 +374,13 @@ def execute_strategy(
                 synchronize(device)
                 lat = (time.perf_counter() - t0) * 1000.0
                 p_idx = int(pred_b.item())
+                pred_label = class_names[p_idx] if p_idx < len(class_names) else f"Class {p_idx}"
                 return {
                     "strategy": "Conventional Switching",
                     "strategy_name": "Conventional Switching",
                     "strategy_key": "CONVENTIONAL",
                     "prediction": p_idx,
-                    "prediction_class": CIFAR10_CLASSES[p_idx],
+                    "prediction_class": pred_label,
                     "confidence": float(conf_b.item()),
                     "latency_ms": lat,
                     "decision": "SWITCH",
@@ -324,6 +420,9 @@ def execute_strategy(
                 pipe.model_a = orig_model_a
                 pipe.model_b = orig_model_b
             p_idx = int(res.get("prediction", 0))
+            pred_label = class_names[p_idx] if p_idx < len(class_names) else f"Class {p_idx}"
+            a_idx = int(pred_a_initial.item())
+            a_label = class_names[a_idx] if a_idx < len(class_names) else f"Class {a_idx}"
             conf = float(res.get("confidence", 0.0))
             status = str(res.get("status", "COMPLETED"))
             lat = float(res.get("latency_ms", 0.0))
@@ -337,10 +436,10 @@ def execute_strategy(
                 "decision": status,
                 "decision_reason": res.get("reason") or res.get("decision_reason") or f"Model evaluation resolved with status '{status}' under threshold {threshold_a:.2f}.",
                 "model_a_latency_ms": lat * 0.45 if "RETAIN" not in status else lat,
-                "model_a_pred_class": CIFAR10_CLASSES[int(pred_a_initial.item())],
+                "model_a_pred_class": a_label,
                 "model_a_conf": float(conf_a_initial.item()),
                 "model_a_topk": [
-                    {"class": CIFAR10_CLASSES[int(idx)], "confidence": float(value)}
+                    {"class": class_names[int(idx)] if int(idx) < len(class_names) else f"Class {idx}", "confidence": float(value)}
                     for value, idx in zip(topk_conf[0].tolist(), topk_idx[0].tolist())
                 ],
                 "executed_probe": first_probe,
@@ -364,7 +463,7 @@ def execute_strategy(
                 "strategy_name": strat_name,
                 "strategy_key": strat_key,
                 "prediction": p_idx,
-                "prediction_class": CIFAR10_CLASSES[p_idx],
+                "prediction_class": pred_label,
                 "confidence": conf,
                 "latency_ms": lat,
                 "decision": decision_type,

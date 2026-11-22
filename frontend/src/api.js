@@ -40,6 +40,10 @@ export const api = {
   clearContinuationCache: () => fetchJson('/cache/clear?type=continuation', { method: 'POST' }),
 
   // Inference
+  testCloudAccuracy: (sampleIndices) => fetchJson('/inference/cloud-test', {
+    method: 'POST',
+    body: JSON.stringify({ sample_indices: sampleIndices }),
+  }),
   getSamples: (count = 12) => fetchJson(`/inference/samples?count=${count}`),
   refreshSamples: (count = 12) => fetchJson(`/inference/samples/refresh?count=${count}`, { method: 'POST' }),
   getCustomModels: () => fetchJson('/training/custom-models'),
@@ -75,6 +79,12 @@ export const api = {
   stopTraining: () => fetchJson('/training/stop', { method: 'POST' }),
   getTrainingRecommendations: () => fetchJson('/training/recommendations'),
   getArchitectures: () => fetchJson('/training/architectures'),
+
+  // Multi-job training
+  startTrainingJob: (payload) => fetchJson('/training/jobs/start', { method: 'POST', body: JSON.stringify(payload) }),
+  listTrainingJobs: () => fetchJson('/training/jobs?include_finished=true'),
+  getJobStatus: (jobId) => fetchJson(`/training/jobs/${encodeURIComponent(jobId)}`),
+  stopJob: (jobId) => fetchJson(`/training/jobs/${encodeURIComponent(jobId)}/stop`, { method: 'POST' }),
 
   // Experiments
   getExperimentRuns: () => fetchJson('/experiments/runs'),

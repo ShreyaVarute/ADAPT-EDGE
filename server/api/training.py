@@ -1,6 +1,7 @@
 """
 Custom PyTorch training and custom-model discovery.
 Supports dynamic architecture selection via the unified model factory.
+Supports multiple concurrent training jobs via per-job TrainingState instances.
 """
 
 import threading
@@ -29,6 +30,11 @@ router = APIRouter(prefix="/api/training", tags=["Model Training"])
 CANDIDATE_MODELS: Dict[str, Dict[str, Any]] = {}
 CANDIDATE_MODELS_LOCK = threading.Lock()
 
+# ── Multi-job registry ─────────────────────────────────────────────────────
+# Maps job_id -> TrainingState
+TRAINING_JOBS: Dict[str, "TrainingState"] = {}
+TRAINING_JOBS_LOCK = threading.Lock()
+
 
 class TrainingConfigRequest(BaseModel):
     model_type: str = "mobilenet_v3_small"
@@ -44,7 +50,9 @@ class TrainingConfigRequest(BaseModel):
 
 
 class TrainingState:
-    def __init__(self):
+    def __init__(self, job_id: str = "default", config: Optional["TrainingConfigRequest"] = None):
+        self.job_id = job_id
+        self.config_snapshot: Dict = config.model_dump() if config else {}
         self.lock = threading.Lock()
         self.status = "IDLE"
         self.current_epoch = 0
@@ -64,6 +72,7 @@ class TrainingState:
         self.device_name = None
         self.gpu_memory_mb = None
         self.thread = None
+        self.created_at: str = time.strftime("%Y-%m-%d %H:%M:%S")
 
     def reset(self, epochs: int):
         with self.lock:
@@ -93,7 +102,11 @@ class TrainingState:
         with self.lock:
             progress = round(self.current_epoch / self.total_epochs * 100.0, 1) if self.total_epochs else 0.0
             return {
+                "job_id": self.job_id,
+                "config": self.config_snapshot,
+                "created_at": self.created_at,
                 "status": self.status,
+                "stop_requested": self.stop_requested,
                 "current_epoch": self.current_epoch,
                 "total_epochs": self.total_epochs,
                 "current_step": self.current_step,
@@ -113,7 +126,32 @@ class TrainingState:
             }
 
 
-TRAINER = TrainingState()
+# Legacy single-trainer kept for backward-compat with settings.py cleanup endpoint
+TRAINER = TrainingState(job_id="legacy")
+
+
+def _validate_config(config: TrainingConfigRequest):
+    """Shared validation for training configs."""
+    if config.model_type not in VALID_MODEL_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"model_type {config.model_type!r} is not supported. "
+                   f"Valid options: {sorted(VALID_MODEL_TYPES)}",
+        )
+    if config.image_size is not None and not (32 <= config.image_size <= 512):
+        raise HTTPException(status_code=400, detail="image_size must be between 32 and 512.")
+    if not 1 <= config.epochs <= 100:
+        raise HTTPException(status_code=400, detail="epochs must be between 1 and 100.")
+    if not 1 <= config.batch_size <= 32:
+        raise HTTPException(status_code=400, detail="batch_size must be between 1 and 32.")
+    if config.learning_rate <= 0:
+        raise HTTPException(status_code=400, detail="learning_rate must be positive.")
+    if not 0.05 <= config.val_split < 0.9:
+        raise HTTPException(status_code=400, detail="val_split must be between 0.05 and 0.89.")
+    if config.device_selection == "cuda" and not torch.cuda.is_available():
+        raise HTTPException(status_code=400, detail="CUDA was requested but is unavailable.")
+    if config.dataset_id != "cifar10":
+        _safe_custom_dataset(config.dataset_id)
 
 
 @router.get("/recommendations")
@@ -178,14 +216,14 @@ def _safe_custom_dataset(dataset_id: str) -> Path:
     return root
 
 
-def _training_worker(config: TrainingConfigRequest):
+def _training_worker(config: TrainingConfigRequest, trainer: TrainingState):
     start_time = time.time()
     device = torch.device(
         "cuda:0" if (config.device_selection in {"auto", "cuda"} and torch.cuda.is_available())
         else "cpu"
     )
-    with TRAINER.lock:
-        TRAINER.device_name = str(device)
+    with trainer.lock:
+        trainer.device_name = str(device)
 
     try:
         if config.dataset_id == "cifar10":
@@ -288,19 +326,18 @@ def _training_worker(config: TrainingConfigRequest):
         peak_vram_mb = 0.0
         val_latencies_ms = []
 
-        with TRAINER.lock:
-            TRAINER.total_steps = len(train_loader)
+        with trainer.lock:
+            trainer.total_steps = len(train_loader)
 
         for epoch in range(1, config.epochs + 1):
-            if TRAINER.stop_requested:
-                TRAINER.status = "STOPPED"
-                TRAINER.add_log("Training stopped by request.")
+            if trainer.stop_requested:
+                trainer.add_log("Training stopped by request.")
                 break
 
             model.train()
             running_loss = correct = total = 0
             for step, (images, labels) in enumerate(train_loader, start=1):
-                if TRAINER.stop_requested:
+                if trainer.stop_requested:
                     break
                 images, labels = images.to(device), labels.to(device)
                 optimizer.zero_grad(set_to_none=True)
@@ -311,17 +348,16 @@ def _training_worker(config: TrainingConfigRequest):
                 running_loss += loss.item() * images.size(0)
                 correct += (outputs.argmax(1) == labels).sum().item()
                 total += labels.size(0)
-                with TRAINER.lock:
-                    TRAINER.current_step = step
-                    TRAINER.elapsed_seconds = time.time() - start_time
+                with trainer.lock:
+                    trainer.current_step = step
+                    trainer.elapsed_seconds = time.time() - start_time
                     if torch.cuda.is_available() and device.type == "cuda":
                         cur_mem = round(torch.cuda.memory_allocated(device) / 1024**2, 1)
-                        TRAINER.gpu_memory_mb = cur_mem
+                        trainer.gpu_memory_mb = cur_mem
                         if cur_mem > peak_vram_mb:
                             peak_vram_mb = cur_mem
 
-            if TRAINER.stop_requested:
-                TRAINER.status = "STOPPED"
+            if trainer.stop_requested:
                 break
 
             model.eval()
@@ -360,13 +396,13 @@ def _training_worker(config: TrainingConfigRequest):
                 "val_acc": round(val_acc, 3),
                 "elapsed_seconds": round(time.time() - start_time, 1),
             }
-            with TRAINER.lock:
-                TRAINER.current_epoch = epoch
-                TRAINER.train_loss = record["train_loss"]
-                TRAINER.val_loss = record["val_loss"]
-                TRAINER.train_acc = record["train_acc"]
-                TRAINER.val_acc = record["val_acc"]
-                TRAINER.history.append(record)
+            with trainer.lock:
+                trainer.current_epoch = epoch
+                trainer.train_loss = record["train_loss"]
+                trainer.val_loss = record["val_loss"]
+                trainer.train_acc = record["train_acc"]
+                trainer.val_acc = record["val_acc"]
+                trainer.history.append(record)
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
@@ -378,14 +414,14 @@ def _training_worker(config: TrainingConfigRequest):
                     for name, value in model.state_dict().items()
                 }
 
-            TRAINER.add_log(
+            trainer.add_log(
                 f"Epoch {epoch}/{config.epochs}: train_loss={train_loss:.4f}, "
                 f"train_acc={train_acc:.2f}%, val_loss={val_loss:.4f}, val_acc={val_acc:.2f}%"
             )
 
-        with TRAINER.lock:
-            status = "STOPPED" if TRAINER.status == "STOPPED" else "COMPLETED"
-            history = list(TRAINER.history)
+        with trainer.lock:
+            status = "STOPPED" if trainer.stop_requested else "COMPLETED"
+            history = list(trainer.history)
 
             # Calculate parameter count, model size, and FLOPs estimation
             param_count = sum(p.numel() for p in model.parameters())
@@ -428,10 +464,10 @@ def _training_worker(config: TrainingConfigRequest):
 
             metrics = {
                 "best_val_accuracy": round(best_val_acc, 3) if best_val_acc >= 0 else None,
-                "final_train_loss": TRAINER.train_loss,
-                "final_val_loss": TRAINER.val_loss,
-                "final_train_accuracy": TRAINER.train_acc,
-                "final_val_accuracy": TRAINER.val_acc,
+                "final_train_loss": trainer.train_loss,
+                "final_val_loss": trainer.val_loss,
+                "final_train_accuracy": trainer.train_acc,
+                "final_val_accuracy": trainer.val_acc,
                 "duration_seconds": round(time.time() - start_time, 1),
                 "parameter_count": param_count,
                 "trainable_parameters": trainable_param_count,
@@ -467,56 +503,110 @@ def _training_worker(config: TrainingConfigRequest):
                     "metrics": metrics,
                     "history": history,
                 }
-            with TRAINER.lock:
-                TRAINER.candidate_model_id = run_id
-                TRAINER.status = status
-                TRAINER.elapsed_seconds = time.time() - start_time
+            with trainer.lock:
+                trainer.candidate_model_id = run_id
+                trainer.status = status
+                trainer.elapsed_seconds = time.time() - start_time
         else:
-            with TRAINER.lock:
-                TRAINER.status = status
-                TRAINER.elapsed_seconds = time.time() - start_time
+            with trainer.lock:
+                trainer.status = status
+                trainer.elapsed_seconds = time.time() - start_time
 
-        TRAINER.add_log(f"Training final status: {status}.")
-    except RuntimeError as exc:
-        TRAINER.status = "FAILED"
-        TRAINER.error_message = ("CUDA out of memory. Reduce batch size or use CPU." if "out of memory" in str(exc).lower() else str(exc))
-        TRAINER.add_log(f"ERROR: {TRAINER.error_message}")
+        trainer.add_log(f"Training final status: {status}.")
+
     except Exception as exc:
-        TRAINER.status = "FAILED"
-        TRAINER.error_message = str(exc)
-        TRAINER.add_log(f"ERROR: {exc}")
+        message = str(exc)
+        if isinstance(exc, RuntimeError) and "out of memory" in message.lower():
+            message = "CUDA out of memory. Reduce batch size or use CPU."
+        trainer.add_log(f"ERROR: {message}")
+        with trainer.lock:
+            trainer.error_message = message
+            trainer.elapsed_seconds = time.time() - start_time
+            trainer.status = "FAILED"
 
+
+# ── Multi-job endpoints ────────────────────────────────────────────────────
+
+@router.post("/jobs/start")
+def start_training_job(config: TrainingConfigRequest):
+    """Launch a new parallel training job. Returns a unique job_id for tracking."""
+    _validate_config(config)
+
+    job_id = f"job_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    trainer = TrainingState(job_id=job_id, config=config)
+
+    resolved = resolve_model_type(config.model_type)
+    display = get_architecture_info(resolved)["display_name"]
+    trainer.reset(config.epochs)
+    trainer.add_log(f"[{job_id}] Starting: {display} on {config.dataset_id}.")
+
+    thread = threading.Thread(target=_training_worker, args=(config, trainer), daemon=True)
+    trainer.thread = thread
+
+    with TRAINING_JOBS_LOCK:
+        TRAINING_JOBS[job_id] = trainer
+
+    try:
+        thread.start()
+    except RuntimeError:
+        with TRAINING_JOBS_LOCK:
+            TRAINING_JOBS.pop(job_id, None)
+        raise HTTPException(status_code=503, detail="Could not start a training worker.")
+
+    return {"success": True, "job_id": job_id, "status": "RUNNING", "message": f"Job {job_id} started."}
+
+
+@router.get("/jobs")
+def list_training_jobs(include_finished: bool = False):
+    """List active jobs and optionally their session history."""
+    with TRAINING_JOBS_LOCK:
+        snapshots = [trainer.snapshot() for trainer in TRAINING_JOBS.values()]
+    jobs = snapshots if include_finished else [
+        job for job in snapshots if job["status"] == "RUNNING"
+    ]
+    return {"success": True, "jobs": jobs, "count": len(jobs)}
+
+
+@router.get("/jobs/{job_id}")
+def get_job_status(job_id: str):
+    """Get telemetry for a specific active training job."""
+    with TRAINING_JOBS_LOCK:
+        trainer = TRAINING_JOBS.get(job_id)
+    if trainer is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    return {"success": True, "telemetry": trainer.snapshot()}
+
+
+@router.post("/jobs/{job_id}/stop")
+def stop_training_job(job_id: str):
+    """Request a specific job to stop after the current batch."""
+    with TRAINING_JOBS_LOCK:
+        trainer = TRAINING_JOBS.get(job_id)
+    if trainer is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    with trainer.lock:
+        if trainer.status != "RUNNING":
+            return {"success": False, "message": f"Job '{job_id}' is not running (status: {trainer.status})."}
+        if trainer.stop_requested:
+            return {"success": True, "message": f"Stop already requested for job '{job_id}'."}
+        trainer.stop_requested = True
+    trainer.add_log(f"Stop requested for job {job_id}.")
+    return {"success": True, "message": f"Stop signal sent to job '{job_id}'."}
+
+
+# ── Legacy single-job endpoints (kept for backward-compat) ─────────────────
 
 @router.post("/start")
 def start_training(config: TrainingConfigRequest):
     if TRAINER.status in {"RUNNING"}:
         raise HTTPException(status_code=409, detail="A training job is already running.")
-    if config.model_type not in VALID_MODEL_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"model_type {config.model_type!r} is not supported. "
-                   f"Valid options: {sorted(VALID_MODEL_TYPES)}",
-        )
-    if config.image_size is not None and not (32 <= config.image_size <= 512):
-        raise HTTPException(status_code=400, detail="image_size must be between 32 and 512.")
-    if not 1 <= config.epochs <= 100:
-        raise HTTPException(status_code=400, detail="epochs must be between 1 and 100.")
-    if not 1 <= config.batch_size <= 32:
-        raise HTTPException(status_code=400, detail="batch_size must be between 1 and 32.")
-    if config.learning_rate <= 0:
-        raise HTTPException(status_code=400, detail="learning_rate must be positive.")
-    if not 0.05 <= config.val_split < 0.9:
-        raise HTTPException(status_code=400, detail="val_split must be between 0.05 and 0.89.")
-    if config.device_selection == "cuda" and not torch.cuda.is_available():
-        raise HTTPException(status_code=400, detail="CUDA was requested but is unavailable.")
-    if config.dataset_id != "cifar10":
-        _safe_custom_dataset(config.dataset_id)
+    _validate_config(config)
 
     resolved = resolve_model_type(config.model_type)
     display = get_architecture_info(resolved)["display_name"]
     TRAINER.reset(config.epochs)
     TRAINER.add_log(f"Starting training: {display} on dataset {config.dataset_id}.")
-    thread = threading.Thread(target=_training_worker, args=(config,), daemon=True)
+    thread = threading.Thread(target=_training_worker, args=(config, TRAINER), daemon=True)
     TRAINER.thread = thread
     thread.start()
     return {"success": True, "status": "RUNNING", "message": "Training started."}
