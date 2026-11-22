@@ -40,12 +40,12 @@ export const api = {
   clearContinuationCache: () => fetchJson('/cache/clear?type=continuation', { method: 'POST' }),
 
   // Inference
-  testCloudAccuracy: (sampleIndices) => fetchJson('/inference/cloud-test', {
+  testCloudAccuracy: (sampleIndices, datasetId = 'cifar10') => fetchJson('/inference/cloud-test', {
     method: 'POST',
-    body: JSON.stringify({ sample_indices: sampleIndices }),
+    body: JSON.stringify({ sample_indices: sampleIndices, dataset_id: datasetId }),
   }),
-  getSamples: (count = 12) => fetchJson(`/inference/samples?count=${count}`),
-  refreshSamples: (count = 12) => fetchJson(`/inference/samples/refresh?count=${count}`, { method: 'POST' }),
+  getSamples: (count = 12, datasetId = 'cifar10') => fetchJson(`/inference/samples?count=${count}&dataset_id=${encodeURIComponent(datasetId)}`),
+  refreshSamples: (count = 12, datasetId = 'cifar10') => fetchJson(`/inference/samples/refresh?count=${count}&dataset_id=${encodeURIComponent(datasetId)}`, { method: 'POST' }),
   getCustomModels: () => fetchJson('/training/custom-models'),
   getModelPair: () => fetchJson('/inference/pair'),
   configureModelPair: (payload) => fetchJson('/inference/pair', { method: 'POST', body: JSON.stringify(payload) }),

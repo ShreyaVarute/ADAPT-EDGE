@@ -47,6 +47,19 @@ def _contained(root: Path, candidate: Path) -> bool:
         return False
 
 
+def dataset_sample_paths(dataset_id: str):
+    root = (CUSTOM_ROOT / _safe_dataset_id(dataset_id)).resolve()
+    if not _contained(CUSTOM_ROOT, root) or not root.is_dir():
+        raise HTTPException(404, "Custom dataset not found.")
+    return [
+        (folder.name, image)
+        for folder in sorted(root.iterdir())
+        if folder.is_dir() and _contained(root, folder)
+        for image in sorted(folder.rglob("*"))
+        if image.suffix.lower() in VALID_EXTENSIONS and _contained(root, image) and image.is_file()
+    ]
+
+
 @router.get("/preview/{dataset_id}/{class_name}/{filename}")
 def preview_image(dataset_id: str, class_name: str, filename: str):
     dataset_id = _safe_dataset_id(dataset_id)

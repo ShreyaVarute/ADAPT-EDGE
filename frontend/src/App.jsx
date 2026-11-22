@@ -59,6 +59,7 @@ import Results from './pages/Results';
 import Settings from './pages/Settings';
 
 export default function App() {
+  const [datasetId, setDatasetId] = useState('cifar10');
   const [activeTab, setActiveTab] = useState('overview');
   const [refreshKey, setRefreshKey] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -74,9 +75,9 @@ export default function App() {
       case 'novelties':
         return <Novelties key={refreshKey} />;
       case 'datatrain':
-        return <DataTrain key={refreshKey} />;
+        return <DataTrain key={refreshKey} datasetId={datasetId} onDatasetChange={setDatasetId} />;
       case 'livedemo':
-        return <LiveDemo key={refreshKey} />;
+        return <LiveDemo key={refreshKey} datasetId={datasetId} onDatasetChange={setDatasetId} />;
       case 'benchmarking':
         return <Benchmarking key={refreshKey} />;
       case 'results':

@@ -6,7 +6,9 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 
-export default function LiveDemo() {
+export default function LiveDemo({ datasetId = 'cifar10', onDatasetChange }) {
+  const [datasets, setDatasets] = useState([]);
+  const [customModelId, setCustomModelId] = useState('');
   const [samples, setSamples] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(null);
   const [preview, setPreview] = useState('');
@@ -28,7 +30,7 @@ export default function LiveDemo() {
     setCloudError('');
     setCloudResult(null);
     try {
-      setCloudResult(await api.testCloudAccuracy(indices));
+      setCloudResult(await api.testCloudAccuracy(indices, datasetId));
     } catch (err) {
       setCloudError(err.message);
     } finally {
@@ -78,10 +80,38 @@ export default function LiveDemo() {
   };
 
   useEffect(() => {
-    api.getSamples(12).then((data) => setSamples(data.samples || [])).catch((err) => setError(err.message));
+    api.getDatasets().then((data) => setDatasets(data.datasets || [])).catch((err) => setError(err.message));
     loadPair();
     loadHistory();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRefreshing(true);
+    api.getSamples(12, datasetId).then((data) => {
+      if (!cancelled) setSamples(data.samples || []);
+    }).catch((err) => {
+      if (!cancelled) setError(err.message);
+    }).finally(() => {
+      if (!cancelled) setRefreshing(false);
+    });
+    return () => { cancelled = true; };
+  }, [datasetId]);
+
+  const datasetName = datasets.find((dataset) => dataset.id === datasetId)?.name
+    || (datasetId === 'cifar10' ? 'CIFAR-10' : datasetId);
+  const isCustomDataset = datasetId !== 'cifar10';
+  const matchingModels = availableCandidates.filter((model) => model.dataset_id === datasetId);
+  const chosenModel = matchingModels.find((model) => model.id === customModelId) || matchingModels[0];
+
+  const selectDataset = (id) => {
+    clear();
+    setSamples([]);
+    setCloudResult(null);
+    setCloudError('');
+    setCustomModelId('');
+    onDatasetChange(id);
+  };
 
   const savePairConfig = async () => {
     setSavingPair(true);
@@ -104,8 +134,8 @@ export default function LiveDemo() {
   const selectSample = (sample) => {
     setSelectedIndex(sample.dataset_index ?? sample.index);
     setPreview(sample.image_b64 || sample.image_base64);
-    setFilename(`CIFAR-10 sample ${sample.dataset_index ?? sample.index}.png`);
-    setDimensions([32, 32]);
+    setFilename(sample.filename || `${datasetName} sample ${sample.dataset_index ?? sample.index}.png`);
+    setDimensions(sample.dimensions || [32, 32]);
     setUploadFile(null);
     setResult(null);
   };
@@ -114,6 +144,7 @@ export default function LiveDemo() {
     if (!file) return;
     setUploadFile(file);
     setFilename(file.name);
+    setDimensions(null);
     setSelectedIndex(null);
     setPreview(URL.createObjectURL(file));
     setResult(null);
@@ -123,7 +154,10 @@ export default function LiveDemo() {
     setRefreshing(true);
     setError('');
     try {
-      const data = await api.refreshSamples(12);
+      const data = await api.refreshSamples(12, datasetId);
+      clear();
+      setCloudResult(null);
+      setCloudError('');
       setSamples(data.samples || []);
     } catch (err) {
       setError(err.message);
@@ -142,10 +176,14 @@ export default function LiveDemo() {
         form.append('image', uploadFile);
         data = await api.uploadAndPredict(form, {
           strategy,
+          modelMode: isCustomDataset ? 'custom' : 'cifar10',
+          customRunId: isCustomDataset ? chosenModel?.id : undefined,
         });
       } else {
         data = await api.predict({
           sample_index: selectedIndex ?? 0,
+          dataset_id: datasetId,
+          custom_run_id: isCustomDataset ? chosenModel?.id : undefined,
           strategy: strategy === 'ALL' ? 'ALL' : strategy,
           threshold_a: pairConfig.threshold_a,
           threshold_probe: pairConfig.threshold_probe,
@@ -172,7 +210,7 @@ export default function LiveDemo() {
     setError('');
   };
 
-  const adapt = result?.adapt_edge_cached || result?.primary;
+  const adapt = result?.model_mode === 'custom' ? null : (result?.adapt_edge_cached || result?.primary);
   const trace = adapt?.trace;
   const action = adapt?.decision || 'Unavailable';
 
@@ -193,6 +231,7 @@ export default function LiveDemo() {
       {pairSavedMsg && <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">{pairSavedMsg}</div>}
 
       {/* ── SECTION 1: MODEL A / MODEL B PAIR CONFIGURATION WORKBENCH ── */}
+      {!isCustomDataset && (
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
           <div className="flex items-center gap-2">
@@ -357,14 +396,25 @@ export default function LiveDemo() {
           </div>
         </div>
       </section>
+      )}
 
       {/* ── SECTION 2: LIVE INFERENCE PIPELINE RUNNER ── */}
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="font-bold text-slate-900">Black-Box Cloud Accuracy</h2>
+            <label className="my-2 flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-700">
+              Test dataset
+              <select value={datasetId} onChange={(event) => selectDataset(event.target.value)}
+                disabled={refreshing || cloudLoading || loading}
+                className="rounded-lg border border-slate-300 px-3 py-1.5">
+                {(datasets.length ? datasets : [{ id: datasetId, name: datasetName }]).map((dataset) => (
+                  <option key={dataset.id} value={dataset.id}>{dataset.name}</option>
+                ))}
+              </select>
+            </label>
             <p className="text-xs text-slate-600">
-              Sends CIFAR-10 images to Amazon Rekognition. Each image uses one API request. AWS charges may apply.
+              Sends images from {datasetName} to Amazon Rekognition. Each image uses one API request. AWS charges may apply.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -387,7 +437,7 @@ export default function LiveDemo() {
           </div>
         </div>
         <p className="text-xs text-slate-500">
-          The highest-scoring cloud label that maps to a CIFAR-10 class is compared with the dataset label.
+          The highest-scoring cloud label that maps to a {datasetName} class is compared with the dataset label.
           Images with no mapped label count as incorrect.
         </p>
         {cloudError && <p role="alert" className="text-sm text-red-700">{cloudError}</p>}
@@ -401,21 +451,27 @@ export default function LiveDemo() {
               <table className="w-full text-left text-xs">
                 <thead>
                   <tr className="bg-slate-50 text-slate-600">
-                    {['Image ID', 'Actual', 'Prediction', 'Result', 'Cloud labels'].map((label) => (
+                    {['Image', 'Actual', 'Prediction', 'Result', 'Cloud labels'].map((label) => (
                       <th key={label} scope="col" className="p-2">{label}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {cloudResult.rows.map((row) => (
+                  {cloudResult.rows.map((row) => {
+                    const sample = samples.find((item) => item.index === row.index);
+                    return (
                     <tr key={row.index} className="border-t border-slate-100">
-                      <td className="p-2">{row.index}</td>
+                      <td className="p-2">
+                        {sample && <img src={sample.image_b64} alt="" className="mb-1 h-10 w-10 rounded object-cover" />}
+                        {sample?.filename || row.index}
+                      </td>
                       <td className="p-2">{row.actual}</td>
                       <td className="p-2">{row.prediction ?? 'Unmapped'}</td>
                       <td className="p-2">{row.correct ? 'Correct' : 'Incorrect'}</td>
                       <td className="p-2">{row.cloud_labels.join(', ')}</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -448,10 +504,10 @@ export default function LiveDemo() {
 
           <div>
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-xs font-semibold text-slate-700">Or Select CIFAR-10 Sample</h3>
+              <h3 className="text-xs font-semibold text-slate-700">Select a {datasetName} sample</h3>
               <button
                 onClick={refreshSamples}
-                disabled={refreshing}
+                disabled={refreshing || cloudLoading || loading}
                 className="rounded border border-slate-300 px-2 py-0.5 text-[11px] font-semibold text-slate-600 disabled:opacity-50"
               >
                 {refreshing ? 'Refreshing...' : 'Refresh'}
@@ -472,6 +528,18 @@ export default function LiveDemo() {
             </div>
           </div>
 
+          {isCustomDataset ? (
+            <label className="block text-xs font-semibold text-slate-700">
+              Model trained on {datasetName}
+              <select value={chosenModel?.id || ''} disabled={!chosenModel}
+                onChange={(event) => setCustomModelId(event.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs">
+                {!chosenModel && <option value="">Train a model on this dataset first</option>}
+                {matchingModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+              </select>
+              <span className="mt-1 block font-normal text-slate-500">Uploaded gallery images may overlap with training data.</span>
+            </label>
+          ) : (
           <div>
             <label className="block text-xs font-semibold text-slate-700">Execution Strategy</label>
             <select
@@ -487,14 +555,15 @@ export default function LiveDemo() {
             </select>
           </div>
 
+          )}
           <div className="flex gap-2 pt-2">
             <button
               onClick={run}
-              disabled={loading || !preview}
+              disabled={loading || refreshing || !preview || (isCustomDataset && !chosenModel)}
               className="flex-1 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:bg-slate-300 flex items-center justify-center gap-1.5 shadow-xs"
             >
               <Zap className="w-3.5 h-3.5" />
-              {loading ? 'Executing...' : 'Run Pipeline'}
+              {loading ? 'Executing...' : isCustomDataset ? 'Run trained model' : 'Run Pipeline'}
             </button>
             <button onClick={clear} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50">
               Clear
@@ -504,7 +573,14 @@ export default function LiveDemo() {
 
         {/* Inference Decision Output Display */}
         <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
-          <h2 className="font-bold text-slate-900">Adaptive Decision Trace</h2>
+          <h2 className="font-bold text-slate-900">{isCustomDataset ? 'Model Prediction' : 'Adaptive Decision Trace'}</h2>
+          {result?.model_mode === 'custom' && (
+            <div className="space-y-2 rounded-lg bg-slate-50 p-4 text-sm">
+              <p>Prediction <strong>{result.primary.prediction_class}</strong></p>
+              {result.true_class && <p>Actual <strong>{result.true_class}</strong> ({result.primary.prediction_class === result.true_class ? 'Correct' : 'Incorrect'})</p>}
+              <p>{(result.primary.confidence * 100).toFixed(1)}% confidence | {result.primary.latency_ms.toFixed(2)} ms</p>
+            </div>
+          )}
 
           {!result ? (
             <div className="rounded-lg border border-slate-200 bg-slate-50 py-16 text-center text-xs text-slate-500">

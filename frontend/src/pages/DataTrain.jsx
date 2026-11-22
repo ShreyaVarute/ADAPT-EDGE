@@ -809,11 +809,11 @@ const TABS = [
   { id: 'training',  label: 'Train Models',      icon: FlaskConical },
 ];
 
-export default function DataTrain() {
+export default function DataTrain({ datasetId = 'cifar10', onDatasetChange }) {
   const [tab,          setTab]          = useState('datasets');
   const [datasets,     setDatasets]     = useState([]);
   const [architectures, setArchitectures] = useState([]);
-  const [selected,     setSelected]     = useState('cifar10');
+  const [selected,     setSelected]     = useState(datasetId);
   const [info,         setInfo]         = useState(null);
   const [infoLoading,  setInfoLoading]  = useState(false);
   const [recommendations, setRec]       = useState(null);
@@ -827,12 +827,16 @@ export default function DataTrain() {
   const [uploadResult, setUploadResult] = useState(null);
 
   const [config, setConfig] = useState({
-    dataset_id: 'cifar10', epochs: 3, batch_size: 4,
+    dataset_id: datasetId, epochs: 3, batch_size: 4,
     learning_rate: 0.001, optimizer_type: 'adam', device_selection: 'auto',
     val_split: 0.15, train_limit: 500,
   });
 
   /* ── loaders ─────────────────────────────────────────────────────── */
+  useEffect(() => {
+    onDatasetChange?.(config.dataset_id);
+  }, [config.dataset_id, onDatasetChange]);
+
   const loadDatasets = useCallback(async () => {
     try {
       const data = await api.getDatasets();

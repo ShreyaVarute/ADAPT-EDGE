@@ -9,8 +9,10 @@ import io
 import threading
 import base64
 import copy
+import random
 import os
 from collections import deque
+from contextlib import closing
 from typing import Dict, Any, Optional
 import boto3
 from botocore.config import Config
@@ -21,9 +23,10 @@ from pydantic import BaseModel, Field
 
 import torch
 import torch.nn.functional as F
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from torchvision import transforms
 from server.core import ServiceManager, CIFAR10_CLASSES, PROJECT_ROOT
+from server.api.datasets import dataset_sample_paths
 from server.api.training import CANDIDATE_MODELS, CANDIDATE_MODELS_LOCK
 from utils.profiling import synchronize
 
@@ -130,6 +133,7 @@ def configure_model_pair(req: ConfigurePairRequest):
 
 
 class PredictRequest(BaseModel):
+    dataset_id: str = "cifar10"
     source: Optional[str] = "sample"  # "sample" or "upload"
     dataset_index: Optional[int] = None
     sample_index: Optional[int] = None
@@ -146,8 +150,10 @@ class PredictRequest(BaseModel):
 
 
 @router.get("/samples")
-def get_sample_gallery(count: int = 12):
+def get_sample_gallery(count: int = 12, dataset_id: str = "cifar10"):
     """Returns pre-loaded CIFAR-10 test set images with thumbnails for 1-click testing."""
+    if dataset_id != "cifar10":
+        return custom_sample_gallery(dataset_id, count)
     mgr = ServiceManager.get_instance()
     samples = mgr.sample_cache[:count] if mgr.sample_cache else []
     return {
@@ -158,11 +164,51 @@ def get_sample_gallery(count: int = 12):
 
 
 @router.post("/samples/refresh")
-def refresh_sample_gallery(count: int = 12):
+def refresh_sample_gallery(count: int = 12, dataset_id: str = "cifar10"):
+    if dataset_id != "cifar10":
+        return custom_sample_gallery(dataset_id, count, shuffle=True)
     mgr = ServiceManager.get_instance()
     if mgr.cifar10_dataset is None:
         raise HTTPException(status_code=503, detail="CIFAR-10 sample dataset is unavailable.")
     samples = mgr.refresh_sample_cache(count=count)
+    return {"success": True, "count": len(samples), "samples": samples}
+
+
+def custom_sample_gallery(dataset_id: str, count: int, shuffle: bool = False):
+    paths = dataset_sample_paths(dataset_id)
+    limit = max(1, min(count, 30))
+    by_class = {}
+    for index, (name, _) in enumerate(paths):
+        by_class.setdefault(name, deque()).append(index)
+    if shuffle:
+        for indices in by_class.values():
+            shuffled = list(indices)
+            random.shuffle(shuffled)
+            indices.clear()
+            indices.extend(shuffled)
+
+    samples = []
+    while by_class and len(samples) < limit:
+        for name, indices in list(by_class.items()):
+            index = indices.popleft()
+            if not indices:
+                del by_class[name]
+            path = paths[index][1]
+            try:
+                with Image.open(path) as source, io.BytesIO() as buffer:
+                    image = source.convert("RGB")
+                    dimensions = list(image.size)
+                    image.thumbnail((128, 128))
+                    image.save(buffer, format="PNG")
+                    preview = base64.b64encode(buffer.getvalue()).decode("ascii")
+            except (OSError, ValueError):
+                continue
+            samples.append({
+                "index": index, "class_name": name, "filename": path.name,
+                "dimensions": dimensions, "image_b64": f"data:image/png;base64,{preview}",
+            })
+            if len(samples) == limit:
+                break
     return {"success": True, "count": len(samples), "samples": samples}
 
 
@@ -178,19 +224,30 @@ CLOUD_LABEL_CLASSES = {
 
 
 class CloudTestRequest(BaseModel):
+    dataset_id: str = "cifar10"
     sample_indices: list[int] = Field(min_length=1, max_length=12)
 
 
 @router.post("/cloud-test")
 def test_cloud_accuracy(req: CloudTestRequest):
-    """Evaluate Amazon Rekognition on explicitly selected CIFAR-10 test samples."""
-    dataset = ServiceManager.get_instance().cifar10_dataset
+    """Evaluate Amazon Rekognition on explicitly selected labeled samples."""
+    is_cifar = req.dataset_id == "cifar10"
+    dataset = ServiceManager.get_instance().cifar10_dataset if is_cifar else dataset_sample_paths(req.dataset_id)
     if dataset is None:
         raise HTTPException(503, "The labeled CIFAR-10 test dataset is unavailable.")
 
     indices = req.sample_indices
     if len(set(indices)) != len(indices) or any(index < 0 or index >= len(dataset) for index in indices):
-        raise HTTPException(400, "Provide unique, valid CIFAR-10 test image indices.")
+        raise HTTPException(400, "Provide unique, valid image indices for the selected dataset.")
+
+    classes = CIFAR10_CLASSES if is_cifar else sorted({name for name, _ in dataset})
+    normalized_classes = {" ".join(name.lower().replace("_", " ").replace("-", " ").split()): name for name in classes}
+    label_map = {
+        alias: normalized_classes[target]
+        for alias, target in CLOUD_LABEL_CLASSES.items()
+        if target in normalized_classes
+    }
+    label_map.update(normalized_classes)
 
     config = dotenv_values(PROJECT_ROOT / ".env", encoding="utf-8-sig", interpolate=False)
     profile = os.environ.get("AWS_PROFILE") or config.get("AWS_PROFILE") or "adapt-edge"
@@ -199,17 +256,30 @@ def test_cloud_accuracy(req: CloudTestRequest):
     start = time.perf_counter()
     try:
         session = boto3.Session(profile_name=profile)
-        with session.client(
+        with closing(session.client(
             "rekognition",
             region_name=region or session.region_name or "us-east-1",
             config=Config(connect_timeout=5, read_timeout=15, retries={"total_max_attempts": 1}),
-        ) as client:
+        )) as client:
             for index in indices:
-                image, label = dataset[index]
-                actual = CIFAR10_CLASSES[label]
-                # CIFAR-10 is 32x32. Rekognition requires both dimensions to be at least 80px.
+                if is_cifar:
+                    image, label = dataset[index]
+                    actual = CIFAR10_CLASSES[label]
+                    image = image.resize((96, 96), Image.Resampling.BILINEAR)
+                else:
+                    actual, path = dataset[index]
+                    try:
+                        with Image.open(path) as source:
+                            image = source.convert("RGB")
+                    except (OSError, ValueError):
+                        raise HTTPException(422, "A selected dataset image could not be read.") from None
+                    image.thumbnail((1024, 1024))
+                    # Rekognition requires both dimensions to be at least 80px.
+                    horizontal = max(0, 80 - image.width)
+                    vertical = max(0, 80 - image.height)
+                    image = ImageOps.expand(image, (horizontal // 2, vertical // 2, (horizontal + 1) // 2, (vertical + 1) // 2))
                 with io.BytesIO() as buffer:
-                    image.resize((96, 96), Image.Resampling.BILINEAR).save(buffer, format="PNG")
+                    image.save(buffer, format="PNG")
                     response = client.detect_labels(
                         Image={"Bytes": buffer.getvalue()},
                         Features=["GENERAL_LABELS"],
@@ -217,7 +287,7 @@ def test_cloud_accuracy(req: CloudTestRequest):
                     )
                 labels = sorted(response.get("Labels", []), key=lambda item: item["Confidence"], reverse=True)
                 descriptions = [item["Name"] for item in labels]
-                mapped = (CLOUD_LABEL_CLASSES.get(name.casefold().strip()) for name in descriptions)
+                mapped = (label_map.get(" ".join(name.lower().replace("_", " ").replace("-", " ").split())) for name in descriptions)
                 prediction = next((name for name in mapped if name is not None), None)
                 rows.append({
                     "index": index, "actual": actual, "prediction": prediction,
@@ -243,7 +313,7 @@ def test_cloud_accuracy(req: CloudTestRequest):
     correct = sum(row["correct"] for row in rows)
     return {
         "correct": correct, "total": len(rows), "accuracy_pct": round(100 * correct / len(rows), 2),
-        "batch_latency_ms": latency_ms, "rows": rows,
+        "batch_latency_ms": latency_ms, "rows": rows, "dataset_id": req.dataset_id,
     }
 
 
@@ -490,6 +560,21 @@ def predict_image(req: PredictRequest):
     
     # Resolve index
     idx = req.sample_index if req.sample_index is not None else (req.dataset_index if req.dataset_index is not None else 0)
+    if req.dataset_id != "cifar10":
+        paths = dataset_sample_paths(req.dataset_id)
+        if idx < 0 or idx >= len(paths):
+            raise HTTPException(400, "Invalid image index for the selected dataset.")
+        with CANDIDATE_MODELS_LOCK:
+            candidate = CANDIDATE_MODELS.get(req.custom_run_id)
+        if candidate is None or candidate["metadata"]["dataset_id"] != req.dataset_id:
+            raise HTTPException(400, "Select a session model trained on this dataset.")
+        actual, path = paths[idx]
+        with path.open("rb") as image:
+            result = predict_uploaded_image(
+                UploadFile(image, filename=path.name),
+                model_mode="custom", custom_run_id=req.custom_run_id,
+            )
+        return {**result, "ground_truth": actual, "true_class": actual, "dataset_id": req.dataset_id}
     
     # Resolve thresholds
     thresh_a = req.tau_high if req.tau_high is not None else req.threshold_a
